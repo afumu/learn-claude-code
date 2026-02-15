@@ -1,5 +1,9 @@
 # Learn Claude Code - Bash 就是 Agent 的一切
 
+<p align="center">
+  <img src="./assets/cover.webp" alt="Learn Claude Code" width="800">
+</p>
+
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://github.com/shareAI-lab/learn-claude-code/actions/workflows/test.yml/badge.svg)](https://github.com/shareAI-lab/learn-claude-code/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
