@@ -10,6 +10,22 @@ v6 的 Tasks 系统解决了任务追踪问题。但无论是子代理还是 bas
                             这段时间什么都做不了
 ```
 
+## 架构总览
+
+```sh
+Main Thread           Background Thread        Notification Queue
+    |                       |                        |
+    +-- run_in_bg() ------> |                        |
+    |   (returns task_id)   |                        |
+    |                       +-- execute fn() ------> |
+    |                       +-- on complete -------> queue.put()
+    |                                                |
+    +-- drain_notifications() <----------------------+
+    +-- inject <task-notification> XML
+```
+
+主线程发起后台任务后立即继续工作。后台线程完成时将通知推入队列，主线程在下一轮 API 调用前排空队列并注入 XML 通知。
+
 ## 解法：后台执行 + 通知
 
 两个改变：

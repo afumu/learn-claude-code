@@ -86,7 +86,25 @@
 7. 探索 v6 的持久化任务追踪
 8. 理解 v7 的并行后台执行
 9. 学习 v8 的团队生命周期与消息通信
+      a. 从 TeammateManager 开始（创建、删除、配置）
+      b. 理解消息协议（5 种类型、JSONL 邮箱）
+      c. 学习 Teammate 循环（简化版：工作 -> 检查邮箱 -> 退出）
+      d. 追踪完整的生命周期：TeamCreate -> spawn -> message -> TeamDelete
 10. 掌握 v9 的自治多 Agent 协作
+
+**注意：** v7 到 v8 是最大的版本跳跃（+411 行，增幅 36%）。v8 一次性引入了团队生命周期、消息协议和邮箱架构。强烈建议使用上述子步骤方式（9a-9d）学习。
+
+## 学习进度
+
+```
+v0(196) -> v1(417) -> v2(531) -> v3(623) -> v4(783)
+   |          |          |          |          |
+ Bash      4 Tools    Planning   Subagent   Skills
+
+-> v5(896) -> v6(1075) -> v7(1142) -> v8(1553) -> v9(1657)
+     |           |            |           |           |
+ Compress     Tasks      Background    Teams     Autonomous
+```
 
 ## 快速开始
 
@@ -113,6 +131,19 @@ python v6_tasks_agent.py        # + 任务系统
 python v7_background_agent.py   # + 后台任务
 python v8_team_agent.py         # + 团队通信
 python v9_autonomous_agent.py  # + 自治团队
+```
+
+## 运行测试
+
+```bash
+# 运行完整测试套件
+python tests/run_all.py
+
+# 仅运行单元测试
+python tests/test_unit.py
+
+# 运行特定版本的测试
+python -m pytest tests/test_v8.py -v
 ```
 
 ## 核心模式

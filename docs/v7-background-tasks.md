@@ -4,10 +4,43 @@
 
 v6 Tasks solved task tracking. But whether it's a subagent or a bash command, the main agent must wait during execution:
 
-```
+```sh
 Main Agent: Task("explore codebase") -> waiting... -> got result -> continue
                                          ^
                                     can't do anything during this time
+```
+
+## Background Execution Flow
+
+```sh
+Main Thread                              Background Threads
++--------------------------+             +-------------------+
+| agent_loop():            |             | Thread A (a3f7c2) |
+|                          |  spawn      | func()            |
+|  Task(bg=True) ---------+-----------> | ...running...     |
+|  Task(bg=True) ----+    |             +-------------------+
+|  Bash(bg=True) -+  |    |             +-------------------+
+|                 |  |    |             | Thread B (a7b2d3) |
+|  (continues     |  +--+-----------> | func()            |
+|   other work)   |     |             | ...running...     |
+|                 +----+-----------> +-------------------+
+|                      |             +-------------------+
+|                      |             | Thread C (b5e8f1) |
+|                      +-----------> | func()            |
+|                                    | ...running...     |
++---+----------------------+         +--------+----------+
+    |                                         |
+    |  drain_notifications()                  | on complete:
+    |  before each API call                   |   event.set()
+    v                                         |   queue.put(notif)
++---+----------------------+                  |
+| Inject into messages:    | <----------------+
+| <task-notification>      |
+|   <task-id>a3f7c2</>     |
+|   <status>completed</>   |
+|   <summary>Found 3...</> |
+| </task-notification>     |
++--------------------------+
 ```
 
 ## The Solution: Background Execution + Notifications
@@ -17,18 +50,18 @@ Two changes:
 1. **Background execution**: subagents and bash can run in the background while the main agent continues
 2. **Notification bus**: when background tasks complete, notifications are pushed to the main agent
 
-```
+```sh
 Main Agent:
   Task(background) ---\
   Bash(background) ----+--- continues other work
   Task(background) ---/
-                          <- notification: "Task A completed"
-                          <- notification: "Command B completed"
+                         <- notification: "Task A completed"
+                         <- notification: "Command B completed"
 ```
 
 ## The BackgroundTask Dataclass
 
-Each background task is tracked as a `BackgroundTask` instance with the following fields:
+Each background task is tracked as a `BackgroundTask` instance:
 
 ```python
 @dataclass
@@ -49,15 +82,15 @@ Each background task type has a distinct ID prefix -- you know the type at a gla
 
 | Type | Prefix | Typical Use |
 |------|--------|-------------|
-| local_bash | `b` | Run tests, lint, build |
-| local_agent | `a` | Explore code, analyze files |
-| in_process_teammate | `t` | Teammate collaboration (v8) |
+| bash | `b` | Run tests, lint, build |
+| agent | `a` | Explore code, analyze files |
+| teammate | `t` | Teammate collaboration (v8) |
 
-IDs are generated as `{prefix}{uuid4_hex[:6]}`, e.g. `b3a9f1` or `a7c2d4`. The prefix gives immediate type visibility in logs and notifications.
+IDs are generated as `{prefix}{uuid4_hex[:6]}`, e.g. `b3a9f1` or `a7c2d4`.
 
 ## Thread Execution Model
 
-Background tasks run in Python daemon threads (`daemon=True`). The execution wrapper follows this pattern:
+Background tasks run in Python daemon threads (`daemon=True`). The execution wrapper:
 
 ```python
 def wrapper():
@@ -69,17 +102,20 @@ def wrapper():
         bg_task.output = f"Error: {e}"
         bg_task.status = "error"      # Errors are captured, not propagated
     finally:
+        output_path = self._write_output(task_id, bg_task.output)
         bg_task.event.set()           # Always signal completion
-        notifications.put({           # Always push notification
+        self._notifications.put({     # Always push notification
             "task_id": task_id,
+            "task_type": bg_task.task_type,
             "status": bg_task.status,
             "summary": bg_task.output[:500],
+            "output_file": str(output_path),
         })
 ```
 
 Key properties:
 - **Error containment**: exceptions are caught and stored in `output`, never crashing the main agent
-- **Guaranteed notification**: the `finally` block ensures a notification is always pushed, whether the task succeeds or fails
+- **Guaranteed notification**: the `finally` block ensures a notification is always pushed
 - **Daemon threads**: if the main process exits, all background threads are automatically terminated
 
 ## Triggering Background Execution
@@ -95,8 +131,6 @@ Task(prompt="Analyze code", run_in_background=True)
 # -> returns immediately: {"task_id": "a3f7c2", "status": "running"}
 ```
 
-After background launch, the task ID returns immediately and the main agent continues working.
-
 ## Two New Tools
 
 ### TaskOutput: Read Background Task Results
@@ -111,7 +145,7 @@ TaskOutput(task_id="a3f7c2", block=False)
 # -> {"status": "running", "output": "...current output..."}
 ```
 
-The `timeout` parameter (in milliseconds) prevents indefinite blocking. If the task does not complete within the timeout, the current status and partial output are returned.
+The `timeout` parameter (in milliseconds) prevents indefinite blocking.
 
 ### TaskStop: Terminate a Background Task
 
@@ -120,7 +154,7 @@ TaskStop(task_id="a3f7c2")
 # -> {"task_id": "a3f7c2", "status": "stopped"}
 ```
 
-`stop_task` sets the status to `"stopped"` and signals the event. This is a cooperative stop -- the thread is not forcibly killed, but the status change can be checked by the running function. For bash commands already spawned via `subprocess.run`, the process will run to completion (or its own timeout).
+`stop_task` sets the status to `"stopped"` and signals the event. This is a cooperative stop -- the thread is not forcibly killed.
 
 ## Notification Drain/Inject Cycle
 
@@ -130,7 +164,7 @@ The notification bus is implemented as a `queue.Queue`. The main agent loop perf
 # 1. Drain: pull all pending notifications from the queue
 notifications = BG.drain_notifications()
 
-# 2. Format: convert to XML blocks (6 tags total)
+# 2. Format: convert to XML blocks
 notif_text = "\n".join(
     f"<task-notification>\n"
     f"  <task-id>{n['task_id']}</task-id>\n"
@@ -149,31 +183,6 @@ else:
     messages.append({"role": "user", "content": notif_text})
 ```
 
-The model sees notifications as structured XML blocks within its conversation context. It can then decide to retrieve full output via `TaskOutput` or continue with the summary.
-
-## Notification XML Protocol
-
-When a background task completes, a notification is automatically injected into the main agent's next turn. The XML contains 6 tags:
-
-```xml
-<task-notification>
-  <task-id>a3f7c2</task-id>
-  <task-type>local_agent</task-type>
-  <status>completed</status>
-  <summary>Found 3 authentication-related files in src/auth/...</summary>
-  <output-file>.task_outputs/a3f7c2.txt</output-file>
-</task-notification>
-```
-
-| Tag | Purpose |
-|-----|---------|
-| `task-notification` | Wrapper element |
-| `task-id` | Unique ID with type prefix (b/a/t) |
-| `task-type` | `local_bash`, `local_agent`, or `in_process_teammate` |
-| `status` | `completed`, `error`, or `stopped` |
-| `summary` | First 500 chars of output for quick triage |
-| `output-file` | Path to full output on disk |
-
 ## Non-Editable Queue Mode
 
 Notification XML blocks are marked as non-editable:
@@ -185,7 +194,7 @@ def is_editable(mode: str) -> bool:
     return mode not in NON_EDITABLE_MODES
 ```
 
-This prevents the model from attempting to modify injected notification text. The notifications are read-only structured data, not part of the editable conversation flow.
+This prevents the model from attempting to modify injected notification text.
 
 ## Output File System
 
@@ -194,18 +203,18 @@ Background task outputs are saved to disk at `.task_outputs/{task_id}.txt`:
 ```python
 OUTPUT_DIR = WORKDIR / ".task_outputs"
 
-def _save_output(self, task_id, output):
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    (OUTPUT_DIR / f"{task_id}.txt").write_text(output)
+def _write_output(self, task_id, output):
+    path = OUTPUT_DIR / f"{task_id}.txt"
+    with open(path, "a") as f:
+        f.write(output)
+    return path
 ```
 
-This serves two purposes:
-1. Large outputs do not bloat the notification (only the 500-char summary is injected)
-2. The output persists on disk even after context compression
+Two purposes: large outputs don't bloat notifications, and output persists after context compression.
 
 ## Typical Flow
 
-```
+```sh
 User: "Analyze code quality in src/ and tests/"
 
 Main Agent:
@@ -223,8 +232,6 @@ Main Agent:
 
 ## Relationship with Tasks (v6)
 
-The two systems are complementary:
-
 | | Tasks (v6) | Background Tasks (v7) |
 |-|-----------|----------------------|
 | Purpose | Planning and tracking | Parallel execution |
@@ -238,14 +245,12 @@ Tasks manage **what to do**. Background tasks manage **how to do it in parallel*
 
 > **From serial to parallel.**
 
-v6 Tasks is a kanban board -- recording what needs to be done. v7 background tasks are a pipeline -- multiple lines running simultaneously.
-
 The notification bus is the key glue layer: the main agent doesn't poll, completions push themselves. The "wait-execute-wait" serial pattern becomes the "launch-keep working-get notified" parallel pattern.
 
-Background tasks also lay the groundwork for v8 Teammates: a Teammate is essentially a special background task (prefix `t`), reusing the same notification and output infrastructure.
+Background tasks lay the groundwork for v8 Teammates: a Teammate is essentially a special background task (prefix `t`), reusing the same notification and output infrastructure.
 
 ---
 
 **Serial waiting wastes time. Parallel notification unlocks efficiency.**
 
-[← v6](./v6-tasks-system.md) | [Back to README](../README.md) | [v8 →](./v8-team-messaging.md)
+[<-- v6](./v6-tasks-system.md) | [Back to README](../README.md) | [v8 -->](./v8-team-messaging.md)

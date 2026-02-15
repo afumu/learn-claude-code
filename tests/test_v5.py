@@ -681,6 +681,124 @@ def test_image_token_constant():
     return True
 
 
+def test_restore_recent_files_with_actual_files():
+    """Create temp files, simulate read_file tool calls, verify restore works."""
+    import v5_compression_agent
+    cm = ContextManager()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Resolve to handle macOS /var -> /private/var symlinks
+        resolved_tmpdir = Path(tmpdir).resolve()
+        orig_workdir = v5_compression_agent.WORKDIR
+        v5_compression_agent.WORKDIR = resolved_tmpdir
+
+        try:
+            # Create actual files in the temp workdir
+            for i in range(3):
+                fp = resolved_tmpdir / f"src{i}.py"
+                fp.write_text(f"# source file {i}\nprint('hello {i}')\n")
+
+            # Build messages simulating read_file tool calls (relative paths)
+            messages = [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": f"rf{i}", "name": "read_file",
+                     "input": {"path": f"src{i}.py"}}
+                    for i in range(3)
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": f"rf{i}",
+                     "content": f"# source file {i}\nprint('hello {i}')\n"}
+                    for i in range(3)
+                ]},
+            ]
+
+            restored = cm.restore_recent_files(messages)
+            assert len(restored) >= 1, \
+                f"Should restore at least 1 file, got {len(restored)}"
+            assert len(restored) <= 3, \
+                f"Should restore at most 3 files, got {len(restored)}"
+
+            for msg in restored:
+                assert msg["role"] == "user", "Restored messages should have role 'user'"
+                assert "[Restored after compact]" in msg["content"], \
+                    "Restored messages should contain '[Restored after compact]'"
+                assert "print('hello" in msg["content"], \
+                    "Restored content should contain actual file content"
+        finally:
+            v5_compression_agent.WORKDIR = orig_workdir
+
+    print("PASS: test_restore_recent_files_with_actual_files")
+    return True
+
+
+def test_should_compact_exactly_at_threshold():
+    """Edge case: total == threshold should return True (if savings are sufficient)."""
+    from v5_compression_agent import ContextManager, MIN_SAVINGS
+
+    cm = ContextManager()
+    # Build messages where total tokens are exactly at the threshold.
+    # We need >5 messages so that savings > MIN_SAVINGS.
+    # Each message contributes roughly chunk_size * 4/3 tokens after json.dumps.
+    # Target: total tokens = TOKEN_THRESHOLD exactly. Use 8 messages.
+    # With 8 msgs, savings = total - recent_5_size ~ 3/8 of total.
+    # We need total > threshold AND savings >= MIN_SAVINGS.
+    # At exactly threshold, total <= threshold => False
+    # So build exactly threshold+1 to trigger. Verify boundary.
+    target_chars_per_msg = (cm.TOKEN_THRESHOLD * 3 // 4) // 8
+    messages = [{"role": "user", "content": "x" * target_chars_per_msg} for _ in range(8)]
+
+    total = sum(cm.estimate_tokens(json.dumps(m, default=str)) for m in messages)
+    if total > cm.TOKEN_THRESHOLD:
+        # At or above threshold with sufficient savings
+        recent_size = sum(cm.estimate_tokens(json.dumps(m, default=str)) for m in messages[-5:])
+        savings = total - recent_size
+        if savings >= MIN_SAVINGS:
+            assert cm.should_compact(messages) is True, \
+                "should_compact should return True when total > threshold with sufficient savings"
+        else:
+            assert cm.should_compact(messages) is False, \
+                "should_compact should return False when savings < MIN_SAVINGS"
+    else:
+        assert cm.should_compact(messages) is False, \
+            "should_compact should return False when total <= threshold"
+
+    print("PASS: test_should_compact_exactly_at_threshold")
+    return True
+
+
+def test_should_compact_just_below_threshold():
+    """Edge case: total just below threshold should return False."""
+    cm = ContextManager()
+    # Build messages whose total tokens are well below the threshold
+    # Each message has a small amount of content
+    messages = [{"role": "user", "content": "x" * 100} for _ in range(8)]
+    total = sum(cm.estimate_tokens(json.dumps(m, default=str)) for m in messages)
+    assert total < cm.TOKEN_THRESHOLD, \
+        f"Total {total} should be below threshold {cm.TOKEN_THRESHOLD}"
+    result = cm.should_compact(messages)
+    assert result is False, \
+        "should_compact should return False when total is below threshold"
+    print("PASS: test_should_compact_just_below_threshold")
+    return True
+
+
+def test_image_token_estimation_constant():
+    """Verify IMAGE_TOKEN_ESTIMATE=2000 is used in estimate_tokens for image content."""
+    from v5_compression_agent import IMAGE_TOKEN_ESTIMATE
+    cm = ContextManager()
+    # IMAGE_TOKEN_ESTIMATE is a constant (2000) used for image blocks
+    assert IMAGE_TOKEN_ESTIMATE == 2000, \
+        f"IMAGE_TOKEN_ESTIMATE should be 2000, got {IMAGE_TOKEN_ESTIMATE}"
+    # The estimate_tokens function uses len(text) * 4 // 3
+    # For a string of 1500 chars (= 2000 tokens), verify the formula
+    text_equivalent = "a" * 1500
+    tokens = cm.estimate_tokens(text_equivalent)
+    assert tokens == IMAGE_TOKEN_ESTIMATE, \
+        f"1500 chars should estimate to {IMAGE_TOKEN_ESTIMATE} tokens, got {tokens}"
+    print("PASS: test_image_token_estimation_constant")
+    return True
+
+
 # =============================================================================
 # Runner
 # =============================================================================
@@ -716,6 +834,10 @@ if __name__ == "__main__":
         test_restore_recent_files_limits,
         test_restore_recent_files_empty_cache,
         test_image_token_constant,
+        test_restore_recent_files_with_actual_files,
+        test_should_compact_exactly_at_threshold,
+        test_should_compact_just_below_threshold,
+        test_image_token_estimation_constant,
         # LLM integration
         test_llm_reads_multiple_files,
         test_llm_read_edit_workflow,

@@ -477,6 +477,133 @@ def test_idle_reasons():
     return True
 
 
+def test_plan_approval_end_to_end():
+    """Write plan_approval_response message to inbox, call check_inbox, verify processing."""
+    from v9_autonomous_agent import TeammateManager, Teammate
+    tm = TeammateManager()
+    tm.create_team("plan-e2e-test")
+    inbox = Path(tempfile.mktemp(suffix=".jsonl"))
+    mate = Teammate(name="planner-e2e", team_name="plan-e2e-test", inbox_path=inbox)
+    tm._teams["plan-e2e-test"]["planner-e2e"] = mate
+
+    # Write a plan_approval_response directly to the inbox file
+    msg = json.dumps({"type": "plan_approval_response", "approved": True,
+                      "content": "Looks good!", "sender": "lead"})
+    with open(inbox, "w") as f:
+        f.write(msg + "\n")
+
+    # Read it via check_inbox
+    messages = tm.check_inbox("planner-e2e", "plan-e2e-test")
+    assert len(messages) == 1, f"Expected 1 message, got {len(messages)}"
+    assert messages[0]["type"] == "plan_approval_response", \
+        f"Expected plan_approval_response, got {messages[0]['type']}"
+    assert messages[0]["approved"] is True, "Expected approved=True"
+
+    # Process via _handle_inbox_messages
+    sub_messages = [{"role": "user", "content": "initial"}]
+    result = tm._handle_inbox_messages(mate, messages, sub_messages)
+    assert result is None, "Approval should not trigger shutdown"
+    assert any("APPROVED" in str(m.get("content", "")) for m in sub_messages), \
+        "Approved plan should inject APPROVED text into conversation"
+
+    inbox.unlink(missing_ok=True)
+    print("PASS: test_plan_approval_end_to_end")
+    return True
+
+
+def test_idle_phase_returns_timeout_on_empty():
+    """Call _idle_phase with no inbox messages and no unclaimed tasks, verify timeout."""
+    import v9_autonomous_agent
+    from v9_autonomous_agent import TeammateManager, Teammate
+
+    tm = TeammateManager()
+    tm.create_team("idle-empty-test")
+    inbox = Path(tempfile.mktemp(suffix=".jsonl"))
+    mate = Teammate(name="empty-idler", team_name="idle-empty-test", inbox_path=inbox)
+    tm._teams["idle-empty-test"]["empty-idler"] = mate
+
+    # Shorten timeout for testing
+    orig_timeout = v9_autonomous_agent.IDLE_TIMEOUT
+    orig_interval = v9_autonomous_agent.IDLE_POLL_INTERVAL
+    v9_autonomous_agent.IDLE_TIMEOUT = 1
+    v9_autonomous_agent.IDLE_POLL_INTERVAL = 1
+
+    sub_messages = [{"role": "user", "content": "initial"}]
+    result = tm._idle_phase(mate, sub_messages)
+    assert result == "timeout", \
+        f"Idle phase with no work should timeout, got '{result}'"
+
+    v9_autonomous_agent.IDLE_TIMEOUT = orig_timeout
+    v9_autonomous_agent.IDLE_POLL_INTERVAL = orig_interval
+    inbox.unlink(missing_ok=True)
+    print("PASS: test_idle_phase_returns_timeout_on_empty")
+    return True
+
+
+def test_claim_task_sets_owner_and_status():
+    """Create a task, call _claim_task, verify task.owner is set and status becomes in_progress."""
+    from v9_autonomous_agent import TeammateManager, Teammate, TASK_MGR
+
+    tm = TeammateManager()
+    tm.create_team("claim-test")
+    inbox = Path(tempfile.mktemp(suffix=".jsonl"))
+    mate = Teammate(name="claimer-test", team_name="claim-test", inbox_path=inbox)
+    tm._teams["claim-test"]["claimer-test"] = mate
+
+    task = TASK_MGR.create("Task to be claimed")
+    sub_messages = [{"role": "user", "content": "initial"}]
+
+    result = tm._claim_task(mate, task, sub_messages)
+    assert result is True, "_claim_task should return True"
+
+    claimed = TASK_MGR.get(task.id)
+    assert claimed.owner == "claimer-test", \
+        f"Task owner should be 'claimer-test', got '{claimed.owner}'"
+    assert claimed.status == "in_progress", \
+        f"Task status should be 'in_progress', got '{claimed.status}'"
+
+    # Verify the task was injected into sub_messages
+    assert len(sub_messages) >= 2, \
+        "Claiming should inject a message into sub_messages"
+    assert "auto-claimed" in sub_messages[-1]["content"].lower() or \
+           task.subject in sub_messages[-1]["content"], \
+        "Injected message should reference the claimed task"
+
+    inbox.unlink(missing_ok=True)
+    print("PASS: test_claim_task_sets_owner_and_status")
+    return True
+
+
+def test_reinject_identity_preserves_existing_content():
+    """Set up messages with existing system content, call _reinject_identity,
+    verify existing content is preserved (not overwritten)."""
+    from v9_autonomous_agent import TeammateManager, Teammate
+
+    mate = Teammate(name="charlie", team_name="delta", agent_id="charlie@delta")
+    original_text = "Work on task X. This is important."
+    sub_messages = [{"role": "user", "content": original_text}]
+
+    TeammateManager._reinject_identity(mate, sub_messages)
+
+    result_content = sub_messages[0]["content"]
+    # Original content must still be present
+    assert original_text in result_content, \
+        "Original content must be preserved after identity injection"
+    # Identity must be injected
+    assert "charlie" in result_content, \
+        "Teammate name must be present after injection"
+    assert "delta" in result_content, \
+        "Team name must be present after injection"
+    assert "charlie@delta" in result_content, \
+        "Agent ID must be present after injection"
+    # Content should be longer than original (appended, not replaced)
+    assert len(result_content) > len(original_text), \
+        "Content should be appended to, not replaced"
+
+    print("PASS: test_reinject_identity_preserves_existing_content")
+    return True
+
+
 # =============================================================================
 # LLM Integration Tests
 # =============================================================================
@@ -600,6 +727,10 @@ if __name__ == "__main__":
         test_plan_approval_approve,
         test_plan_approval_reject,
         test_idle_reasons,
+        test_plan_approval_end_to_end,
+        test_idle_phase_returns_timeout_on_empty,
+        test_claim_task_sets_owner_and_status,
+        test_reinject_identity_preserves_existing_content,
         # LLM integration
         test_llm_v9_creates_team,
         test_llm_v9_task_workflow,

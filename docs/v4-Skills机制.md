@@ -12,6 +12,20 @@ v3 给了我们子代理来分解任务。但还有一个更深的问题：**模
 
 这些知识不是工具——是**专业技能**。Skills 通过让模型按需加载领域知识来解决这个问题。
 
+## Skill 加载流程
+
+```sh
+skills/
+  code-review/
+    SKILL.md  -->  frontmatter: name, description
+                   body: markdown instructions
+                        |
+                        v
+                   system_prompt += skill body
+```
+
+Skill 目录下的 `SKILL.md` 包含 YAML 前置元数据和 Markdown 正文。元数据始终加载用于索引，正文在触发时注入上下文窗口。
+
 ## 核心概念
 
 ### 工具 vs 技能

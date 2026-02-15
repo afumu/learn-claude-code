@@ -734,6 +734,158 @@ def test_message_requires_recipient():
     return True
 
 
+def test_config_persists_after_spawn():
+    """Create team, add teammate via _update_team_config, verify config.json has the member entry."""
+    import v8_team_agent
+    orig_dir = v8_team_agent.TEAMS_DIR
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v8_team_agent.TEAMS_DIR = Path(tmpdir)
+        tm = TeammateManager()
+        tm.create_team("persist-test")
+
+        inbox = Path(tempfile.mktemp(suffix=".jsonl"))
+        mate = Teammate(name="alice", team_name="persist-test", inbox_path=inbox)
+        tm._teams["persist-test"]["alice"] = mate
+        tm._update_team_config("persist-test")
+
+        config_path = Path(tmpdir) / "persist-test" / "config.json"
+        assert config_path.exists(), "config.json should exist after adding teammate"
+        data = json.loads(config_path.read_text())
+        member_names = [m["name"] for m in data.get("members", [])]
+        assert "alice" in member_names, \
+            f"config.json should list 'alice' as member, got {member_names}"
+
+        inbox.unlink(missing_ok=True)
+        v8_team_agent.TEAMS_DIR = orig_dir
+    print("PASS: test_config_persists_after_spawn")
+    return True
+
+
+def test_config_recovers_after_teammate_shutdown():
+    """Add teammate, then remove, verify config.json reflects the removal."""
+    import v8_team_agent
+    orig_dir = v8_team_agent.TEAMS_DIR
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v8_team_agent.TEAMS_DIR = Path(tmpdir)
+        tm = TeammateManager()
+        tm.create_team("remove-test")
+
+        inbox = Path(tempfile.mktemp(suffix=".jsonl"))
+        mate = Teammate(name="bob", team_name="remove-test", inbox_path=inbox)
+        tm._teams["remove-test"]["bob"] = mate
+        tm._update_team_config("remove-test")
+
+        config_path = Path(tmpdir) / "remove-test" / "config.json"
+        data = json.loads(config_path.read_text())
+        assert len(data["members"]) == 1, "Should have 1 member"
+
+        del tm._teams["remove-test"]["bob"]
+        tm._update_team_config("remove-test")
+
+        data = json.loads(config_path.read_text())
+        assert len(data["members"]) == 0, \
+            f"After removal, members should be empty, got {data['members']}"
+
+        inbox.unlink(missing_ok=True)
+        v8_team_agent.TEAMS_DIR = orig_dir
+    print("PASS: test_config_recovers_after_teammate_shutdown")
+    return True
+
+
+def test_broadcast_to_many_teammates():
+    """Create team with 5+ teammates, broadcast, verify all receive (excluding sender)."""
+    tm = TeammateManager()
+    tm.create_team("big-bcast")
+
+    inboxes = []
+    names = ["sender"] + [f"worker{i}" for i in range(5)]
+    for name in names:
+        inbox = Path(tempfile.mktemp(suffix=".jsonl"))
+        mate = Teammate(name=name, team_name="big-bcast", inbox_path=inbox)
+        tm._teams["big-bcast"][name] = mate
+        inboxes.append(inbox)
+
+    tm.send_message("", "Team update", msg_type="broadcast",
+                    sender="sender", team_name="big-bcast")
+
+    sender_msgs = tm.check_inbox("sender", "big-bcast")
+    assert len(sender_msgs) == 0, \
+        f"Sender should not receive broadcast, got {len(sender_msgs)} msgs"
+
+    for i in range(5):
+        name = f"worker{i}"
+        msgs = tm.check_inbox(name, "big-bcast")
+        assert len(msgs) == 1, \
+            f"{name} should have received 1 broadcast, got {len(msgs)}"
+        assert "Team update" in msgs[0]["content"], \
+            f"{name} broadcast content mismatch"
+
+    for inbox in inboxes:
+        inbox.unlink(missing_ok=True)
+    print("PASS: test_broadcast_to_many_teammates")
+    return True
+
+
+def test_broadcast_with_no_teammates():
+    """Empty team (only sender), broadcast, verify count=0."""
+    tm = TeammateManager()
+    tm.create_team("empty-bcast")
+
+    inbox = Path(tempfile.mktemp(suffix=".jsonl"))
+    mate = Teammate(name="lonely", team_name="empty-bcast", inbox_path=inbox)
+    tm._teams["empty-bcast"]["lonely"] = mate
+
+    result = tm.send_message("", "Nobody here", msg_type="broadcast",
+                             sender="lonely", team_name="empty-bcast")
+    assert "0" in result, \
+        f"Broadcast with only sender should reach 0 teammates, got: {result}"
+
+    msgs = tm.check_inbox("lonely", "empty-bcast")
+    assert len(msgs) == 0, \
+        f"Sender should not receive own broadcast, got {len(msgs)} msgs"
+
+    inbox.unlink(missing_ok=True)
+    print("PASS: test_broadcast_with_no_teammates")
+    return True
+
+
+def test_multi_owner_race_condition():
+    """Two threads simultaneously try to update same task's owner, verify consistency."""
+    import threading
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        task_mgr = TaskManager(Path(tmpdir))
+        task_mgr.create("Race condition task")
+
+        errors = []
+        results = []
+
+        def claim_task(owner_name):
+            try:
+                task_mgr.update("1", owner=owner_name)
+                task = task_mgr.get("1")
+                results.append(task.owner)
+            except Exception as e:
+                errors.append(e)
+
+        t1 = threading.Thread(target=claim_task, args=("alice",))
+        t2 = threading.Thread(target=claim_task, args=("bob",))
+
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert len(errors) == 0, f"Race condition errors: {errors}"
+
+        final_task = task_mgr.get("1")
+        assert final_task.owner in ("alice", "bob"), \
+            f"Final owner should be 'alice' or 'bob', got '{final_task.owner}'"
+
+    print("PASS: test_multi_owner_race_condition")
+    return True
+
+
 # =============================================================================
 # LLM Integration Tests
 # =============================================================================
@@ -933,6 +1085,11 @@ if __name__ == "__main__":
         test_teammate_tools_includes_task_get,
         test_broadcast_no_recipient,
         test_message_requires_recipient,
+        test_config_persists_after_spawn,
+        test_config_recovers_after_teammate_shutdown,
+        test_broadcast_to_many_teammates,
+        test_broadcast_with_no_teammates,
+        test_multi_owner_race_condition,
         # LLM integration tests
         test_llm_creates_team,
         test_llm_sends_message,

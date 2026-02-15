@@ -86,7 +86,25 @@
 7. v6で永続的なタスク追跡を探求する
 8. v7で並列バックグラウンド実行を理解する
 9. v8でチームのライフサイクルとメッセージングを学ぶ
+      a. TeammateManagerから始める（作成、削除、設定）
+      b. メッセージプロトコルを理解する（5種類、JSONL受信箱）
+      c. Teammateループを学ぶ（簡略版: 作業 -> 受信箱確認 -> 終了）
+      d. 完全なライフサイクルを追跡する: TeamCreate -> spawn -> message -> TeamDelete
 10. v9で自律的なマルチエージェント協調をマスターする
+
+**注意:** v7からv8は最大のバージョンジャンプ（+411行、36%増加）です。v8はチームライフサイクル、メッセージプロトコル、受信箱アーキテクチャを一度に導入します。上記のサブステップアプローチ（9a-9d）を強く推奨します。
+
+## 学習の進行
+
+```
+v0(196) -> v1(417) -> v2(531) -> v3(623) -> v4(783)
+   |          |          |          |          |
+ Bash      4 Tools    Planning   Subagent   Skills
+
+-> v5(896) -> v6(1075) -> v7(1142) -> v8(1553) -> v9(1657)
+     |           |            |           |           |
+ Compress     Tasks      Background    Teams     Autonomous
+```
 
 ## クイックスタート
 
@@ -113,6 +131,19 @@ python v6_tasks_agent.py        # + タスクシステム
 python v7_background_agent.py   # + バックグラウンドタスク
 python v8_team_agent.py         # + チーム通信
 python v9_autonomous_agent.py  # + 自律チーム
+```
+
+## テストの実行
+
+```bash
+# フルテストスイートを実行
+python tests/run_all.py
+
+# ユニットテストのみ実行
+python tests/test_unit.py
+
+# 特定バージョンのテストを実行
+python -m pytest tests/test_v8.py -v
 ```
 
 ## コアパターン

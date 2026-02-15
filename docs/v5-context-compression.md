@@ -6,7 +6,7 @@ v0-v4 share an implicit assumption: conversation history can grow forever. In pr
 
 ## The Problem
 
-```
+```sh
 200K token context window:
   [System prompt]       ~2K tokens
   [CLAUDE.md]           ~3K tokens
@@ -18,11 +18,33 @@ v0-v4 share an implicit assumption: conversation history can grow forever. In pr
 
 A complex refactoring task can take 100+ tool calls. Without compression, the agent hits the wall.
 
+## Token Budget Waterfall
+
+```sh
+Context Window: 200,000 tokens
++------------------------------------------------------------------+
+|                                                                  |
+|  [1] Output Reserve: min(max_output, 20000) = 16,384            |
+|      Tokens reserved for model's response                       |
+|                                                                  |
+|  [2] Safety Buffer: 13,000                                      |
+|      System prompt + tool defs + overhead                        |
+|                                                                  |
+|  [3] Available for Conversation: 170,616                         |
+|      = 200,000 - 16,384 - 13,000                                |
+|                                                                  |
++------------------------------------------------------------------+
+         |
+         v
+  When conversation tokens > 170,616 AND savings >= 2000:
+         |
+         v
+  Trigger auto_compact()
+```
+
 ## Three-Layer Compression Pipeline
 
-Not one technique, but three progressive layers:
-
-```
+```sh
 Every agent turn:
 +------------------+
 | Tool call result |
@@ -30,25 +52,30 @@ Every agent turn:
         |
         v
 [Layer 1: Microcompact]         (silent, every turn)
-Keep last 3 tool results.
-Replace older results with:
-"[Output compacted - re-read if needed]"
+  Keep last 3 tool results.
+  Replace older results with:
+  "[Output compacted - re-read if needed]"
         |
         v
-[Check: tokens > threshold?]    threshold = ctx_window - output_reserve - 13000
+[Check: tokens > 170616?]
         |
    no --+-- yes
    |         |
    v         v
-continue  [Layer 2: Auto-compact]        (near limit)
-          Summarize full conversation.
-          Keep last 5 messages.
-          Restore up to 5 recent files.
-                  |
-                  v
-          [Layer 3: Manual compact]      (user /compact)
-          User-specified focus.
-          Same mechanism, custom prompt.
+continue  [Check: savings >= 2000?]
+               |
+          no --+-- yes
+          |         |
+          v         v
+       continue  [Layer 2: Auto-compact]       (near limit)
+                   1. Save transcript to disk
+                   2. Restore recent files
+                   3. Summarize full conversation
+                   4. Keep last 5 messages
+                        |
+                        v
+                 [Layer 3: Manual /compact]     (user-initiated)
+                   Same mechanism, custom prompt
 
 Throughout: full transcript saved to disk (JSONL).
 ```
@@ -78,7 +105,7 @@ The 13000 buffer accounts for system prompt, tool definitions, and overhead. The
 Compaction is skipped if the estimated savings are too small:
 
 ```python
-MIN_SAVINGS = 20000
+MIN_SAVINGS = 2000
 
 def should_compact(messages):
     total = sum(estimate_tokens(m) for m in messages)
@@ -114,12 +141,11 @@ Key: only the **content** is cleared. The tool call structure stays intact. The 
 
 ## Token Estimation
 
-Tokens are estimated using the character-based formula from cli.js:
+Tokens are estimated using the character-based formula:
 
 ```python
 @staticmethod
 def estimate_tokens(text: str) -> int:
-    # cli.js PU1: Math.ceil(chars * 1.333)
     return len(text) * 4 // 3
 ```
 
@@ -145,12 +171,12 @@ def auto_compact(messages):
     compressed = [
         {"role": "user", "content": f"[Conversation compressed]\n{summary}"},
         {"role": "assistant", "content": "Understood. Continuing with compressed context."},
-        *messages[-5:]
     ]
-
-    # 5. Restore file contents so they are not lost
-    if restored_files:
-        compressed[0]["content"] += "\n\n" + restored_files
+    # Interleave restored files as user/assistant pairs
+    for rf in restored_files:
+        compressed.append(rf)
+        compressed.append({"role": "assistant", "content": "Noted, file content restored."})
+    compressed.extend(messages[-5:])
 
     return compressed
 ```
@@ -180,8 +206,10 @@ This ensures the agent retains awareness of files it was recently working on, wi
 When a single tool output is too large, save to disk and return a preview:
 
 ```python
-def handle_tool_output(output):
-    if estimate_tokens(output) > 40000:
+MAX_OUTPUT_TOKENS = 40000
+
+def handle_large_output(output):
+    if estimate_tokens(output) > MAX_OUTPUT_TOKENS:
         path = save_to_disk(output)
         return f"Output too large. Saved to: {path}\nPreview:\n{output[:2000]}..."
     return output
@@ -196,6 +224,7 @@ def run_subagent(prompt, agent_type):
     sub_messages = [{"role": "user", "content": prompt}]
 
     while True:
+        sub_messages = microcompact(sub_messages)
         if should_compact(sub_messages):
             sub_messages = auto_compact(sub_messages)
 
@@ -208,15 +237,6 @@ def run_subagent(prompt, agent_type):
 ```
 
 Disk persistence from compression lays the groundwork for later mechanisms: the Tasks system (v6) and multi-agent collaboration (v8) store data on disk, unaffected by compression.
-
-## Comparison
-
-| Aspect | v4 and before (no compression) | v5 (three-layer) |
-|--------|-------------------------------|-------------------|
-| Max conversation length | Limited by context window | Theoretically unlimited |
-| Long task reliability | Crashes on overflow | Graceful degradation |
-| History data | All in memory | Disk persistence + in-memory summary |
-| Recovery | None | Resume from summary or transcript |
 
 ## The Deeper Insight
 
@@ -234,4 +254,4 @@ The full record is always on disk. Compression only affects working memory, not 
 
 **Context is finite, work is infinite. Compression keeps the agent going.**
 
-[← v4](./v4-skills-mechanism.md) | [Back to README](../README.md) | [v6 →](./v6-tasks-system.md)
+[<-- v4](./v4-skills-mechanism.md) | [Back to README](../README.md) | [v6 -->](./v6-tasks-system.md)

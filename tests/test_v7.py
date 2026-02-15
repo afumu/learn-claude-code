@@ -458,6 +458,67 @@ def test_output_file_incremental_read():
     return True
 
 
+def test_background_task_error_recovery():
+    """Run a failing lambda in background, verify error handling."""
+    bm = BackgroundManager()
+    task_id = bm.run_in_background(
+        lambda: (_ for _ in ()).throw(ValueError("test failure")),
+        task_type="bash",
+    )
+    result = bm.get_output(task_id, block=True, timeout=5000)
+
+    assert result["status"] == "error", \
+        f"Failed task should have status 'error', got '{result['status']}'"
+    assert "Error:" in result["output"], \
+        f"Output should contain 'Error:', got '{result['output']}'"
+
+    time.sleep(0.1)
+    notifications = bm.drain_notifications()
+    error_notifs = [n for n in notifications if n["task_id"] == task_id]
+    assert len(error_notifs) == 1, \
+        f"Expected 1 error notification, got {len(error_notifs)}"
+    assert error_notifs[0]["status"] == "error", \
+        f"Notification status should be 'error', got '{error_notifs[0]['status']}'"
+    assert "test failure" in error_notifs[0]["summary"], \
+        f"Notification summary should contain error info, got '{error_notifs[0]['summary']}'"
+
+    print("PASS: test_background_task_error_recovery")
+    return True
+
+
+def test_output_file_incremental_read_offset():
+    """Write output to file, read with various offsets, verify partial content."""
+    from v7_background_agent import BackgroundManager
+    import v7_background_agent
+    bm = BackgroundManager()
+
+    test_id = "test_offset_read"
+    bm._write_output(test_id, "ABCDEFGHIJ")
+
+    # Read full content (offset=0)
+    full = bm.read_output(test_id, offset=0)
+    assert full == "ABCDEFGHIJ", f"Full read expected 'ABCDEFGHIJ', got '{full}'"
+
+    # Read from offset=5
+    partial = bm.read_output(test_id, offset=5)
+    assert partial == "FGHIJ", f"Offset=5 expected 'FGHIJ', got '{partial}'"
+
+    # Read from offset=10 (at end)
+    empty = bm.read_output(test_id, offset=10)
+    assert empty == "", f"Offset=10 should return empty, got '{empty}'"
+
+    # Append more data, read from previous end
+    bm._write_output(test_id, "KLMNO")
+    new_data = bm.read_output(test_id, offset=10)
+    assert new_data == "KLMNO", f"After append, offset=10 expected 'KLMNO', got '{new_data}'"
+
+    # Cleanup
+    output_path = v7_background_agent.OUTPUT_DIR / f"{test_id}.txt"
+    output_path.unlink(missing_ok=True)
+    print("PASS: test_output_file_incremental_read_offset")
+    return True
+
+
 # =============================================================================
 # LLM Integration Tests
 # =============================================================================
@@ -632,6 +693,8 @@ if __name__ == "__main__":
         test_notification_xml_all_tags,
         test_output_file_append,
         test_output_file_incremental_read,
+        test_background_task_error_recovery,
+        test_output_file_incremental_read_offset,
         # LLM integration tests
         test_llm_uses_task_output,
         test_llm_uses_task_stop,

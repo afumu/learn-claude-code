@@ -86,7 +86,25 @@ Start Here
 7. Explore v6 for persistent task tracking
 8. Understand v7 for parallel background execution
 9. Study v8 for team lifecycle and messaging
+      a. Start with TeammateManager (creation, deletion, config)
+      b. Understand the message protocol (5 types, JSONL inbox)
+      c. Study the teammate loop (simplified: work -> check inbox -> exit)
+      d. Trace a full lifecycle: TeamCreate -> spawn -> message -> TeamDelete
 10. Master v9 for autonomous multi-agent collaboration
+
+**Note:** v7 to v8 is the largest version jump (+411 lines, 36% increase). v8 introduces team lifecycle, message protocol, and inbox architecture all at once. The sub-step approach above (9a-9d) is strongly recommended.
+
+## Learning Progression
+
+```
+v0(196) -> v1(417) -> v2(531) -> v3(623) -> v4(783)
+   |          |          |          |          |
+ Bash      4 Tools    Planning   Subagent   Skills
+
+-> v5(896) -> v6(1075) -> v7(1142) -> v8(1553) -> v9(1657)
+     |           |            |           |           |
+ Compress     Tasks      Background    Teams     Autonomous
+```
 
 ## Quick Start
 
@@ -113,6 +131,19 @@ python v6_tasks_agent.py        # + Task system
 python v7_background_agent.py   # + Background tasks
 python v8_team_agent.py         # + Team messaging
 python v9_autonomous_agent.py  # + Autonomous teams
+```
+
+## Running Tests
+
+```bash
+# Run full test suite
+python tests/run_all.py
+
+# Run unit tests only
+python tests/test_unit.py
+
+# Run tests for a specific version
+python -m pytest tests/test_v8.py -v
 ```
 
 ## The Core Pattern

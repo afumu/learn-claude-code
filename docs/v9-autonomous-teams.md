@@ -4,7 +4,39 @@
 
 v8 gave us teammates: persistent agents that communicate through inboxes and share a task board. But v8 teammates are reactive -- they execute their initial prompt, check for messages, and shut down when there is nothing left. They do not autonomously pick up new work.
 
-v9 adds the missing piece: **teammate autonomy**. Teammates go idle when their work is done, poll for new messages and unclaimed tasks, and wake up when they find something to do. The team becomes self-organizing.
+v9 adds the missing piece: **teammate autonomy**. Teammates go idle when their work is done, poll for new messages and unclaimed tasks, and wake up when they find something to do.
+
+## v8 vs v9 Teammate Comparison
+
+```sh
+v8 Teammate (one-shot):
+  spawn -> work (tool loop) -> check inbox -> nothing? -> shutdown
+
+  +-------+     +------+     +-------+     +---------+
+  | spawn | --> | work | --> | check | --> | shutdown|
+  +-------+     +------+     | inbox |     +---------+
+                              +---+---+
+                                  |
+                              msg found? --> back to work
+                              (one chance)
+
+v9 Teammate (persistent with idle cycle):
+  spawn -> work (tool loop) -> idle (poll 2s x 30) -> wake or timeout
+
+  +-------+     +------+          +------+
+  | spawn | --> | WORK | -------> | IDLE | -------> timeout? -> shutdown
+  +-------+     +--+---+          +--+---+
+                   ^                 |
+                   |     msg/task    |    poll every 2s
+                   +----- found -----+    for 60 seconds
+                                     |
+                                     +--- check inbox
+                                     |    - shutdown_request -> exit
+                                     |    - message -> resume WORK
+                                     |
+                                     +--- scan unclaimed tasks
+                                          - found -> claim -> resume WORK
+```
 
 ## What v9 Adds to v8
 
@@ -18,9 +50,7 @@ v9 adds the missing piece: **teammate autonomy**. Teammates go idle when their w
 
 ## Autonomous Teammate Lifecycle
 
-The teammate lifecycle becomes a continuous `active -> idle -> active` cycle:
-
-```
+```sh
 +-------+
 | spawn |
 +---+---+
@@ -34,8 +64,8 @@ The teammate lifecycle becomes a continuous `active -> idle -> active` cycle:
     | stop_reason != tool_use
     v
 +--------+
-| IDLE   |  <-- poll every 2s
-| phase  |      for 60s
+| IDLE   |  <-- poll every IDLE_POLL_INTERVAL (2s)
+| phase  |      for IDLE_TIMEOUT (60s)
 +---+----+
     |
     +-------> check inbox
@@ -43,23 +73,26 @@ The teammate lifecycle becomes a continuous `active -> idle -> active` cycle:
     |         - plan_approval?    -> handle approval
     |         - new message?      -> resume WORK
     |
-    +-------> scan unclaimed tasks
-    |         - found? -> claim task -> resume WORK
+    +-------> _scan_unclaimed_tasks()
+    |         - found? -> _claim_task() -> resume WORK
     |
-    +-------> timeout with no activity?
-    |         -> continue (check again, up to 60s)
-    |
-    +-------> 60s expired with no new work?
+    +-------> IDLE_TIMEOUT expired with no new work?
               -> shutdown (graceful exit)
 ```
 
-In the **active** phase, the teammate runs a normal agent loop (API call -> tool use -> API call). When the model stops calling tools (`stop_reason != "tool_use"`), the teammate transitions to **idle**.
+## Autonomy Constants
 
-In the **idle** phase, the teammate polls its inbox every 2 seconds for up to 60 seconds:
-1. If a **new message** arrives, inject it into context and return to active
-2. If an **unclaimed task** is found on the task board (status=pending, no owner, no blockers), auto-claim it and return to active
-3. If a **shutdown_request** arrives, exit the loop entirely
-4. If nothing happens for 60 seconds, restart the idle polling cycle
+```python
+IDLE_POLL_INTERVAL = 2     # seconds between idle polls
+IDLE_TIMEOUT = 60          # seconds before giving up on new work
+
+IDLE_REASONS = {
+    "no_tool_use": "Model returned without tool calls",
+    "awaiting_messages": "Polling inbox for new messages",
+    "awaiting_tasks": "Scanning board for unclaimed tasks",
+    "timeout": "Idle timeout expired with no new work",
+}
+```
 
 ## The Full Teammate Loop
 
@@ -76,7 +109,7 @@ def _teammate_loop(self, teammate, initial_prompt):
         if CTX.should_compact(sub_messages):
             sub_messages = CTX.auto_compact(sub_messages)
             # Re-inject identity after compression
-            identity = f"\n\nRemember: You are teammate '{teammate.name}' in team '{teammate.team_name}'."
+            identity = f"\n\nRemember: You are teammate '{teammate.name}'."
             if sub_messages and sub_messages[0].get("role") == "user":
                 sub_messages[0]["content"] += identity
 
@@ -94,7 +127,7 @@ def _teammate_loop(self, teammate, initial_prompt):
         # === Idle phase: wait for new messages or unclaimed tasks ===
         teammate.status = "idle"
 
-        for _ in range(30):  # Check every 2 seconds for 60 seconds
+        for _ in range(30):  # 30 checks x 2s = 60s
             if teammate.status == "shutdown":
                 return
 
@@ -105,7 +138,6 @@ def _teammate_loop(self, teammate, initial_prompt):
                 sub_messages.append({"role": "user", "content": format(new_messages)})
                 break
 
-            # Auto-claim unclaimed tasks
             unclaimed = [t for t in TASK_MGR.list_all()
                          if t.status == "pending" and not t.owner and not t.blocked_by]
             if unclaimed:
@@ -131,13 +163,11 @@ if unclaimed:
     TASK_MGR.update(task.id, status="in_progress", owner=teammate.name)
 ```
 
-The claiming follows first-come-first-served order (sorted by task ID). The thread lock in `TaskManager.update()` prevents race conditions when multiple teammates try to claim the same task.
-
-This means the Team Lead can create a batch of tasks upfront, and teammates will pick them up as they become available (after dependencies are resolved). No explicit assignment needed.
+First-come-first-served by task ID. The thread lock in `TaskManager.update()` prevents race conditions when multiple teammates try to claim the same task.
 
 ## Identity Preservation After Compression
 
-When a teammate's context is compressed (v5 auto_compact), the compressed summary does not preserve who the teammate is. The teammate loop re-injects identity:
+When a teammate's context is compressed, the summary does not preserve who the teammate is. The loop re-injects identity:
 
 ```python
 if CTX.should_compact(sub_messages):
@@ -146,7 +176,7 @@ if CTX.should_compact(sub_messages):
     sub_messages[0]["content"] += identity
 ```
 
-This ensures the model retains its role and team context even after aggressive context compression. Without this, a teammate could "forget" it is part of a team after auto-compact and start behaving like a standalone agent.
+Without this, a teammate could "forget" it is part of a team after auto-compact and behave like a standalone agent.
 
 ## Full Collaboration Flow
 
@@ -171,21 +201,11 @@ frontend:  idle... <- #4 unblocked -> claims #4 -> done -> idle
 Team Lead: all tasks done -> TeamDelete -> "Migration complete."
 ```
 
-Three mechanisms working together:
+Four mechanisms working together:
 - **Tasks (v6)** is the shared board -- everyone sees the same progress
 - **Compression (v5)** lets each role work long -- no context limit
 - **Message protocol (v8)** lets roles communicate freely
 - **Autonomy (v9)** lets teammates self-organize -- no micromanagement
-
-## Plan Approval Protocol
-
-v9 adds full support for the `plan_approval_response` message type. When a teammate needs approval for a significant change:
-
-1. Teammate sends plan details to the Team Lead via `SendMessage`
-2. Team Lead reviews and sends `plan_approval_response` with `approve=true/false`
-3. Teammate reads the response in its inbox and proceeds (or revises)
-
-This is a lightweight approval gate -- no separate tool needed, just a message type convention.
 
 ## v0 to v9: The Complete Story
 
@@ -202,13 +222,13 @@ v8: Multiple agents, communicating
 v9: Multiple agents, self-organizing
 ```
 
-Each step solves the bottleneck exposed by the previous one. v9 is the capstone -- not because you cannot add more features, but because the basic elements of agent collaboration are complete: **shared state (Tasks) + parallel execution (Background) + communication (Messages) + autonomy (Idle cycle + auto-claim)**.
+Each step solves the bottleneck exposed by the previous one.
 
 ## The Deeper Insight
 
 > **A team that manages itself.**
 
-v8 teammates are colleagues: they communicate, share a board, work in parallel. But they still wait for explicit instructions. v9 teammates are autonomous: they find unclaimed work, claim it, execute it, and return to idle. The Team Lead sets direction and creates tasks; teammates self-organize to complete them.
+v8 teammates are colleagues: they communicate, share a board, work in parallel. But they still wait for explicit instructions. v9 teammates are autonomous: they find unclaimed work, claim it, execute it, and return to idle.
 
 ```sh
 v8 Teammate -> executes assigned work, communicates results  (junior)
@@ -222,4 +242,4 @@ The ultimate form of an agent system is not a smarter model, but **a group of mo
 
 **One agent has limits. A team of autonomous agents has none.**
 
-[← v8](./v8-team-messaging.md) | [Back to README](../README.md)
+[<-- v8](./v8-team-messaging.md) | [Back to README](../README.md)

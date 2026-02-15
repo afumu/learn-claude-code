@@ -738,7 +738,7 @@ def auto_compact_threshold(context_window: int = 200000, max_output: int = 16384
     return context_window - output_reserve - 13000
 
 
-MIN_SAVINGS = 20000
+MIN_SAVINGS = 2000
 MAX_RESTORE_FILES = 5
 MAX_RESTORE_TOKENS_PER_FILE = 5000
 MAX_RESTORE_TOKENS_TOTAL = 50000

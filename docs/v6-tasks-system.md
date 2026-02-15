@@ -6,7 +6,7 @@ v2 introduced TodoWrite to solve "the model forgets its plan." But with compress
 
 ## The Problem
 
-```
+```sh
 TodoWrite limitations:
   1. Write-only with overwrite (sends entire list each time)
   2. No persistence (lost after compression)
@@ -23,17 +23,42 @@ v5 compression clears in-memory todos. Subagents can't share tasks. The Tasks sy
 |---------|---------------|------------|
 | Operations | Overwrite | CRUD (create/read/update/delete) |
 | Persistence | Memory only (lost on compact) | Disk files (survives compact) |
-| Concurrency | Unsafe | File locks |
+| Concurrency | Unsafe | Thread-level locking |
 | Dependencies | None | blocks / blockedBy |
 | Ownership | None | Agent name |
 | Multi-agent | Not supported | Native support |
+
+## Task State Machine with Dependency Auto-Clear
+
+```sh
++--------+     update(status)     +-------------+     update(status)     +-----------+
+| pending| ------------------->   | in_progress | ------------------->   | completed |
++--------+                        +-------------+                        +-----+-----+
+    ^                                    |                                     |
+    |          update(status)            |                                     |
+    +------------------------------------+                                     |
+                (re-open)                                                      |
+                                                                               |
+  Any state ---> deleted (permanent removal)                                   |
+                                                                               |
+  On completion, auto-clear dependency:                                        |
+  +---------------------------------------------------------------------------+
+  |
+  v
+  for each task T where T.blocked_by contains completed_id:
+      T.blocked_by.remove(completed_id)
+      if T.blocked_by is now empty:
+          T becomes executable
+```
+
+When a task transitions to `completed`, `_clear_dependency()` scans all other tasks and removes the completed task ID from their `blocked_by` lists. This makes downstream tasks automatically executable.
 
 ## Data Model
 
 ```python
 @dataclass
 class Task:
-    id: str              # Auto-increment ID (highwatermark)
+    id: str              # Highwatermark auto-increment ID
     subject: str         # Imperative title: "Fix auth bug"
     description: str     # Detailed description
     status: str = "pending"  # pending | in_progress | completed
@@ -41,116 +66,74 @@ class Task:
     owner: str = ""          # Responsible agent
     blocks: list = []        # Tasks blocked by this one
     blocked_by: list = []    # Prerequisites blocking this task
-    metadata: dict = {}      # Arbitrary key-value pairs
 ```
-
-Why each field matters:
-
-| Field | Reason |
-|-------|--------|
-| `id` | CRUD needs a unique identifier |
-| `owner` | Multi-agent: who is doing what |
-| `blocks/blockedBy` | Dependency graph for task orchestration |
-| `description` | Another agent can understand the task |
-| `metadata` | Extensible key-value data for any use case |
-
-## Task State Machine
-
-```
-+--------+     update(status)     +-------------+     update(status)     +-----------+
-| pending| ------------------->   | in_progress | ------------------->   | completed |
-+--------+                        +-------------+                        +-----------+
-    ^                                    |
-    |          update(status)            |
-    +------------------------------------+
-                (re-open)
-
-  Any state ---> deleted (permanent removal)
-```
-
-When a task transitions to `completed`, its dependents' `blocked_by` lists are automatically updated.
 
 ## Highwatermark ID Allocation
 
-Task IDs are allocated using a highwatermark file (`.highwatermark`), not by scanning existing task files:
+Task IDs use a counter that only goes up, loaded from scanning existing task files on startup:
 
 ```python
-HIGHWATERMARK_FILE = ".highwatermark"
-
-def _next_id(self):
-    """Get next task ID and persist highwatermark."""
-    with self._lock:
-        self._highwatermark += 1
-        (self.tasks_dir / HIGHWATERMARK_FILE).write_text(str(self._highwatermark))
-        return str(self._highwatermark)
+def _load_counter(self):
+    existing = list(self.tasks_dir.glob("task_*.json"))
+    if not existing:
+        return 1
+    ids = [int(f.stem.split("_")[1]) for f in existing]
+    return max(ids) + 1 if ids else 1
 ```
 
-This prevents ID reuse if tasks are deleted. On startup, the highwatermark is loaded from the file, or falls back to scanning existing task files if the file is missing.
+This prevents ID reuse if tasks are deleted. IDs are monotonically increasing.
 
-## Auto-Owner on Status Change
-
-When a task transitions to `in_progress` and has no owner, the agent automatically assigns itself:
-
-```python
-if kwargs.get("status") == "in_progress" and not task.owner:
-    task.owner = kwargs.get("owner", os.getenv("CLAUDE_AGENT_NAME", "agent"))
-```
-
-This saves the model from needing to explicitly set `owner` every time it starts a task.
-
-## Four Tools
+## Four CRUD Tools
 
 ```python
 # TaskCreate: create a task
-task_create("Fix auth bug", description="...", active_form="Fixing auth bug")
+TaskCreate("Fix auth bug", description="...", activeForm="Fixing auth bug")
 # -> {"id": "1", "subject": "Fix auth bug"}
 
 # TaskGet: read details
-task_get("1")
+TaskGet("1")
 # -> {id, subject, description, status, blocks, blockedBy}
 
 # TaskUpdate: update status, dependencies, owner
-task_update("1", status="in_progress")  # auto-assigns owner
-task_update("2", addBlockedBy=["1"])    # 2 depends on 1
+TaskUpdate("1", status="in_progress")
+TaskUpdate("2", addBlockedBy=["1"])    # 2 depends on 1
 
 # TaskList: list all tasks
-task_list()
-# -> [{id, subject, status, owner, blockedBy}, ...]
+TaskList()
+# -> #1. [>] Fix auth bug  @agent
+#    #2. [ ] Write tests   blocked by: #1
 ```
 
 ## Dependency Graph
 
-```
+```sh
 TaskCreate: "Set up database"       -> #1
 TaskCreate: "Write API endpoints"   -> #2
 TaskCreate: "Write tests"           -> #3
 
 TaskUpdate: id=2, addBlockedBy=["1"]     # API depends on database
 TaskUpdate: id=3, addBlockedBy=["1","2"] # Tests depend on both
-```
 
 Rendered view:
-
-```
 #1. [>] Set up database          (in_progress)
 #2. [ ] Write API endpoints      blocked by: #1
 #3. [ ] Write tests              blocked by: #1, #2
+
+When #1 completes -> _clear_dependency("1"):
+#1. [x] Set up database          (completed)
+#2. [ ] Write API endpoints      (now executable)
+#3. [ ] Write tests              blocked by: #2
 ```
 
-When #1 completes, #2's blockedBy is automatically cleared and becomes executable.
-
-## Persistence
+## File-Based Persistence
 
 ```python
-def save_task(task):
-    """File-level locking for concurrency safety."""
-    path = f"tasks/{task.id}.json"
-    with FileLock(path + ".lock"):
-        with open(path, 'w') as f:
-            json.dump(task.to_dict(), f)
+def _save_task(self, task):
+    path = self.tasks_dir / f"task_{task.id}.json"
+    path.write_text(json.dumps(asdict(task), indent=2))
 ```
 
-Why files instead of a database?
+Why files instead of a database:
 - One file per task = fine-grained locking
 - Subagents may run in separate processes
 - JSON files are human-readable, easy to debug
@@ -159,28 +142,12 @@ Why files instead of a database?
 
 Tasks persist on disk, unaffected by compression:
 
-```
+```sh
 Before compact: [100 turns of conversation] + [5 tasks on disk]
 After compact:  [summary + recent 5 turns]  + [5 tasks on disk]  <- tasks intact
 ```
 
 TodoWrite couldn't do this -- its tasks lived only in message history, gone after compression.
-
-## Feature Gate
-
-In our educational code, v6 replaces TodoWrite entirely with the Tasks system. The two systems are conceptually mutually exclusive:
-
-```python
-# v2 uses TodoWrite (in-memory, overwrite-only)
-# v6 uses TaskCreate/Get/Update/List (disk-persisted, CRUD)
-
-# In our implementation, v6 simply includes Tasks tools
-# and removes TodoWrite from the tool set
-ALL_TOOLS = BASE_TOOLS + [TASK_CREATE_TOOL, TASK_GET_TOOL,
-                          TASK_UPDATE_TOOL, TASK_LIST_TOOL]
-```
-
-The key difference: TodoWrite data lives only in message history (lost on compression), while Tasks data lives on disk (survives compression).
 
 ## The Deeper Insight
 
@@ -188,14 +155,10 @@ The key difference: TodoWrite data lives only in message history (lost on compre
 
 TodoWrite is a sticky note -- one person uses it, then discards it. Tasks is a project board -- multi-party collaboration, state transitions, dependency tracking.
 
-This is a **paradigm shift in collaboration**:
-- TodoWrite: the model's self-discipline tool (v2 philosophy: constraints enable)
-- Tasks: a multi-agent coordination protocol (v6 philosophy: collaboration enables)
-
 When agents evolve from individual to collective, task management must evolve from "checklist" to "system."
 
 ---
 
 **A checklist keeps one agent organized. A task system keeps a team in order.**
 
-[← v5](./v5-context-compression.md) | [Back to README](../README.md) | [v7 →](./v7-background-tasks.md)
+[<-- v5](./v5-context-compression.md) | [Back to README](../README.md) | [v7 -->](./v7-background-tasks.md)
