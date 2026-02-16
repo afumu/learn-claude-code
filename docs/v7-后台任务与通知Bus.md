@@ -87,7 +87,7 @@ def wrapper():
     finally:
         output_path = self._write_output(task_id, bg_task.output)
         bg_task.event.set()           # 总是发出完成信号
-        # 匹配 cli.js attachment pipeline 的通知格式
+        # 推送任务完成通知
         notifications.put({
             "type": "attachment",
             "attachment": {
@@ -148,7 +148,7 @@ TaskStop(task_id="a3f7c2")
 
 ## 通知排空/注入循环
 
-通知 Bus 基于 `queue.Queue` 实现。主 Agent 循环在每次 API 调用前执行**排空并注入**循环。通知使用匹配 cli.js 的 attachment 格式：
+通知 Bus 基于 `queue.Queue` 实现。主 Agent 循环在每次 API 调用前执行**排空并注入**循环。通知使用 attachment 格式：
 
 ```python
 # 1. 排空：从队列中拉取所有待处理通知
@@ -178,7 +178,7 @@ if notifications:
 OUTPUT_DIR = WORKDIR / ".task_outputs"
 
 def _write_output(self, task_id, content):
-    # cli.js jSA=32000 默认值，可通过 TASK_MAX_OUTPUT_LENGTH 环境变量配置到 160000
+    # 默认值 32000，可通过 TASK_MAX_OUTPUT_LENGTH 环境变量配置到 160000
     max_output_chars = int(os.getenv("TASK_MAX_OUTPUT_LENGTH", "32000"))
     path = OUTPUT_DIR / f"{task_id}.output"
     truncated = content[:max_output_chars]

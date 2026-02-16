@@ -1,79 +1,75 @@
 #!/usr/bin/env python3
 """
-v9_autonomous_agent.py - Mini Claude Code: Autonomous Teams (~1400 lines)
+v8c_coordination.py - Mini Claude Code: Shared Task Board & Shutdown Protocol (~1500 lines)
 
-Core Philosophy: "Teammates That Think for Themselves"
-======================================================
-v8c gave us teams with coordination: persistent agents with inboxes,
-shared task board, shutdown protocol, and plan approval.
-But v8c teammates only execute their initial prompt, then shut down.
+Core Philosophy: "From Commands to Collaboration - Coordination"
+=================================================================
+v8a gave us teams: persistent agents with identity and lifecycle.
+v8b gave us messaging: file-based inboxes with 5 message types.
 
-v9 adds autonomy: teammates that idle, watch the task board for unclaimed
-work, and wake up when new messages arrive. They persist like real
-colleagues who stay in the office, picking up tasks as they appear.
+v8c adds coordination: teammates can use the shared task board to
+track work, the shutdown protocol uses request_id for reliable
+handoff, and plan approval lets the lead review teammate plans.
 
-    v8c teammate lifecycle: spawn -> work (inbox + task board) -> shutdown
-    v9 teammate lifecycle:  spawn -> work -> idle -> check -> work -> ... -> shutdown
+    v8b teammate:  spawn -> work (check inbox each turn) -> shutdown
+    v8c teammate:  spawn -> work (inbox + task board) -> shutdown
 
-    AUTONOMOUS TEAMMATE LIFECYCLE
-    ==============================
+    SHARED TASK BOARD COORDINATION
+    ===============================
 
-    +-------+
-    | spawn |
-    +---+---+
-        |
-        v
-    +-------+    tool_use     +---------+
-    | WORK  | <------------- | API call |
-    | phase |                 +---------+
-    +---+---+
-        |
-        | stop_reason != tool_use
-        v
-    +--------+
-    | IDLE   |  <-- poll every IDLE_POLL_INTERVAL (1s)
-    | phase  |      for IDLE_TIMEOUT (60s)
-    +---+----+
-        |
-        +-------> check inbox
-        |         - shutdown_request? -> exit
-        |         - plan_approval?    -> handle approval
-        |         - new message?      -> resume WORK
-        |
-        +-------> _scan_unclaimed_tasks()
-        |         - found? -> _claim_task() -> resume WORK
-        |
-        +-------> timeout with no activity?
-        |         -> continue (check again, up to IDLE_TIMEOUT)
-        |
-        +-------> IDLE_TIMEOUT expired with no new work?
-                  -> shutdown (graceful exit)
+    Team Lead                     Shared Task Board (.tasks/)
+    +-----------+                 +---------------------+
+    | TaskCreate|+--------------->| task_1.json         |
+    +-----------+                 | task_2.json         |
+                                  | task_3.json         |
+    Teammate A                    +-----^-----+---------+
+    +-----------+                       |     |
+    | TaskGet   |+----------------------+     |
+    | TaskUpdate|+----------------------------+
+    +-----------+
 
-    IDLE_REASONS: Tracks why the teammate is idle for debugging.
+    Teammate B
+    +-----------+
+    | TaskList  |+--- reads same board
+    | TaskUpdate|+--- writes same board
+    +-----------+
 
-Three autonomy features on top of v8:
+    SHUTDOWN PROTOCOL (with request_id)
+    ====================================
 
-    Idle Cycle          After exhausting tool calls, the teammate enters an
-                        idle phase: every 1 second for 60 seconds, it checks
-                        its inbox and the task board for new work.
-                        Production cli.js uses passive turn-level idle
-                        (agent waits for input injection). We use active
-                        polling as a teaching simplification that achieves
-                        equivalent behavior.
+    Lead                          Teammate
+    +--------+                    +--------+
+    | send   |  shutdown_request  |        |
+    | msg    +---(request_id)---->| check  |
+    +--------+                    | inbox  |
+                                  +---+----+
+                                      |
+                                      v
+                                  handle: set status="shutdown"
+                                  respond with request_id
 
-    Auto-Claiming       During idle, if an unclaimed task (pending, no owner,
-                        no blockers) appears on the board, the teammate claims
-                        it and starts working on it automatically.
-                        Production relies on prompt instructions (model calls
-                        TaskList+TaskUpdate). We implement code-level
-                        auto-claiming for explicit teaching of the concept.
+    PLAN APPROVAL FLOW
+    ===================
+    Teammate sends plan -> Lead reviews -> plan_approval_response
+    -> Teammate receives approval/rejection with feedback
 
-    Identity Injection  After auto_compact compresses context, the teammate's
-                        identity (name, team, agent_id) is re-injected into
-                        the first message so it doesn't forget who it is.
+    TEAMMATE STATUS TRACKING
+    ========================
+    active   - currently executing tool calls
+    idle     - no current work (v9 adds idle polling)
+    shutdown - gracefully exiting
+
+Key design details:
+    - Teammates get full task CRUD: TaskCreate, TaskGet, TaskUpdate, TaskList
+    - shutdown_request carries a request_id; teammate must echo it back
+    - Plan approval is a structured message, not a tool call
+    - Status tracked per-teammate and persisted in config.json
+    - Full team lifecycle demo in main() shows create/spawn/work/delete
+
+v9 adds: idle cycle with auto-claiming and autonomous task pickup
 
 Usage:
-    python v9_autonomous_agent.py
+    python v8c_coordination.py
 """
 
 import json
@@ -107,10 +103,9 @@ WORKDIR = Path.cwd()
 SKILLS_DIR = WORKDIR / "skills"
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 TASKS_DIR = WORKDIR / ".tasks"
-OUTPUT_DIR = WORKDIR / ".task_outputs"
-# cli.js stores team config at ~/.claude/teams/{name}/config.json;
-# we use a local .teams/ directory for educational simplicity.
+# We use a local .teams/ directory for simplicity.
 TEAMS_DIR = WORKDIR / ".teams"
+OUTPUT_DIR = WORKDIR / ".task_outputs"
 
 # Notification modes that should not be editable by the model
 NON_EDITABLE_MODES = {"task-notification"}
@@ -128,18 +123,6 @@ def is_editable(mode: str) -> bool:
 # TeammateManager
 # =============================================================================
 
-# Autonomy timing constants
-IDLE_POLL_INTERVAL = 1     # seconds between idle polls (cli.js cZz=1000ms)
-IDLE_TIMEOUT = 60          # seconds before giving up on new work
-
-# Tracks why a teammate is idle (for debugging and logging)
-IDLE_REASONS = {
-    "no_tool_use": "Model returned without tool calls",
-    "awaiting_messages": "Polling inbox for new messages",
-    "awaiting_tasks": "Scanning board for unclaimed tasks",
-    "timeout": "Idle timeout expired with no new work",
-}
-
 # ANSI colors for teammate output (cycles through for visual distinction)
 TEAMMATE_COLORS = [
     "\033[36m",   # cyan
@@ -150,17 +133,19 @@ TEAMMATE_COLORS = [
 ]
 COLOR_RESET = "\033[0m"
 
+# All supported message types for the SendMessage tool
+MESSAGE_TYPES = {"message", "broadcast", "shutdown_request", "shutdown_response", "plan_approval_response"}
+
 
 @dataclass
 class Teammate:
     name: str
     team_name: str
     agent_id: str = ""
-    status: str = "active"
+    status: str = "active"      # active, idle, shutdown
     thread: threading.Thread = field(default=None, repr=False)
     inbox_path: Path = field(default=None)
     color: str = ""
-    idle_reason: str = ""
 
     def __post_init__(self):
         if not self.agent_id:
@@ -169,34 +154,35 @@ class Teammate:
 
 class TeammateManager:
     """
-    Manages autonomous agent teammates that work independently.
+    Manages persistent agent teammates with messaging and coordination.
 
     Each teammate runs in its own thread with its own agent loop,
     communicates via file-based inbox, and shares the Tasks board.
 
-    Teammates receive TEAMMATE_TOOLS (BASE_TOOLS + task CRUD + messaging)
+    Teammates receive TEAMMATE_TOOLS (BASE_TOOLS + task CRUD + SendMessage)
     so they can update the shared task board and communicate with peers.
 
-    After completing their immediate work, teammates enter an idle cycle
-    where they poll for new messages and unclaimed tasks. This makes them
-    truly autonomous -- they pick up work without being explicitly told.
+    Coordination features (new in v8c):
+    - Shared task board: teammates can TaskCreate/TaskGet/TaskUpdate/TaskList
+    - Shutdown protocol: request_id tracking for reliable handoff
+    - Plan approval: lead approves/rejects teammate plans
+    - Status tracking: active/idle/shutdown per teammate
 
     Message types:
         message              - point-to-point message to a specific teammate
         broadcast            - message to all teammates in a team
-        shutdown_request     - request teammate to shut down
-        shutdown_response    - teammate confirms shutdown
-        plan_approval_response - team lead approves a plan
+        shutdown_request     - request teammate to shut down (carries request_id)
+        shutdown_response    - teammate confirms shutdown (echoes request_id)
+        plan_approval_response - team lead approves/rejects a plan
     """
-
-    MESSAGE_TYPES = {"message", "broadcast", "shutdown_request", "shutdown_response", "plan_approval_response"}
 
     def __init__(self):
         self._teams: dict[str, dict[str, Teammate]] = {}
         self._lock = threading.Lock()
+        self._pending_shutdowns: dict[str, str] = {}  # request_id -> teammate_name
         TEAMS_DIR.mkdir(exist_ok=True)
 
-    def create_team(self, name: str) -> str:
+    def create_team(self, name: str, description: str = "", lead_agent_id: str = "lead") -> str:
         with self._lock:
             if name in self._teams:
                 return f"Team '{name}' already exists"
@@ -206,13 +192,15 @@ class TeammateManager:
             config_path = team_dir / "config.json"
             config_path.write_text(json.dumps({
                 "name": name,
-                "created_at": time.time(),
+                "description": description,
+                "createdAt": time.time(),
+                "leadAgentId": lead_agent_id,
                 "members": [],
             }, indent=2))
             return f"Team '{name}' created"
 
     def spawn_teammate(self, name: str, team_name: str, prompt: str) -> str:
-        """Spawn an autonomous teammate that runs its own agent loop."""
+        """Spawn a persistent teammate that runs its own agent loop."""
         with self._lock:
             if team_name not in self._teams:
                 return f"Error: Team '{team_name}' not found"
@@ -245,7 +233,7 @@ class TeammateManager:
             })
 
     def _update_team_config(self, team_name: str):
-        """Update config.json to reflect current team membership."""
+        """Update config.json to reflect current team membership and status."""
         team_dir = TEAMS_DIR / team_name
         config_path = team_dir / "config.json"
         config = {}
@@ -255,7 +243,13 @@ class TeammateManager:
             except json.JSONDecodeError:
                 pass
         config["members"] = [
-            {"name": tm.name, "agent_id": tm.agent_id, "status": tm.status}
+            {
+                "name": tm.name,
+                "agentId": tm.agent_id,
+                "agentType": "teammate",
+                "status": tm.status,
+                "joinedAt": time.time(),
+            }
             for tm in self._teams.get(team_name, {}).values()
         ]
         config_path.write_text(json.dumps(config, indent=2))
@@ -286,7 +280,7 @@ class TeammateManager:
                      sender: str = "lead", team_name: str = None,
                      summary: str = "", request_id: str = "") -> str:
         """Send a message to a teammate or broadcast to all teammates in a team."""
-        if msg_type not in self.MESSAGE_TYPES:
+        if msg_type not in MESSAGE_TYPES:
             return f"Error: Invalid message type '{msg_type}'"
 
         message = {
@@ -299,6 +293,11 @@ class TeammateManager:
             message["summary"] = summary
         if request_id:
             message["request_id"] = request_id
+        # Auto-generate request_id for shutdown_request if not provided
+        if msg_type == "shutdown_request" and not request_id:
+            auto_id = uuid.uuid4().hex[:8]
+            message["request_id"] = auto_id
+            self._pending_shutdowns[auto_id] = recipient
 
         # Broadcast: send to ALL teammates in the team, excluding sender
         if msg_type == "broadcast":
@@ -371,8 +370,10 @@ class TeammateManager:
 
             team = self._teams[name]
             for tm_name, teammate in team.items():
+                req_id = uuid.uuid4().hex[:8]
                 self.send_message(tm_name, "Team is being deleted. Please shutdown.",
-                                  msg_type="shutdown_request", team_name=name)
+                                  msg_type="shutdown_request", team_name=name,
+                                  request_id=req_id)
                 teammate.status = "shutdown"
 
             del self._teams[name]
@@ -406,121 +407,23 @@ class TeammateManager:
                 return team[name]
         return None
 
-    def _teammate_loop(self, teammate: Teammate, initial_prompt: str):
-        """
-        Full autonomous teammate work cycle: active -> idle -> check -> active.
-
-        Unlike v8 teammates that execute and shut down, v9 teammates persist:
-        they complete their work, go idle, then wake up when new messages
-        arrive or unclaimed tasks appear on the board.
-
-        When auto_compact compresses context, we re-inject the teammate's
-        identity so it doesn't forget who it is.
-        """
-        color = teammate.color
-        reset = COLOR_RESET
-        prefix = f"{color}[{teammate.agent_id}]{reset}"
-
-        sub_system = f"""You are teammate '{teammate.name}' ({teammate.agent_id}) in team '{teammate.team_name}' at {WORKDIR}.
-
-Work on your assigned tasks. Use TaskList to find unclaimed tasks.
-Use TaskGet to read task details before starting work.
-Use TaskUpdate to mark progress. Use SendMessage to communicate with teammates.
-When done with current work, report completion and wait for new instructions.
-
-Complete work efficiently and report results clearly."""
-
-        sub_tools = _get_teammate_tools()
-        sub_messages = [{"role": "user", "content": initial_prompt}]
-
-        while teammate.status != "shutdown":
-            teammate.status = "active"
-            teammate.idle_reason = ""
-
-            try:
-                # Check inbox before each turn
-                inbox_messages = self.check_inbox(teammate.name, teammate.team_name)
-                if inbox_messages:
-                    handled = self._handle_inbox_messages(teammate, inbox_messages, sub_messages)
-                    if handled == "shutdown":
-                        return
-                    # Messages were injected into sub_messages
-
-                sub_messages = CTX.microcompact(sub_messages)
-                if CTX.should_compact(sub_messages):
-                    sub_messages = CTX.auto_compact(sub_messages)
-                    self._reinject_identity(teammate, sub_messages)
-
-                response = client.messages.create(
-                    model=MODEL, system=sub_system,
-                    messages=sub_messages, tools=sub_tools, max_tokens=8000,
-                )
-
-                if response.stop_reason == "tool_use":
-                    tool_calls = [b for b in response.content if b.type == "tool_use"]
-                    results = []
-                    for tc in tool_calls:
-                        output = execute_tool(tc.name, tc.input)
-                        output = CTX.handle_large_output(output)
-                        results.append({"type": "tool_result", "tool_use_id": tc.id, "content": output})
-                    sub_messages.append({"role": "assistant", "content": response.content})
-                    sub_messages.append({"role": "user", "content": results})
-                    continue
-                else:
-                    sub_messages.append({"role": "assistant", "content": response.content})
-
-            except Exception as e:
-                sub_messages.append({"role": "assistant", "content": [{"type": "text", "text": f"Error: {e}"}]})
-
-            # Enter idle phase: poll for new work
-            idle_result = self._idle_phase(teammate, sub_messages)
-            if idle_result == "shutdown":
-                return
-            elif idle_result == "timeout":
-                # No new work found after IDLE_TIMEOUT -- shut down gracefully
-                teammate.status = "shutdown"
-                self._update_team_config(teammate.team_name)
-                return
-            # Otherwise idle_result == "resume" -> continue the loop
-
-    def _idle_phase(self, teammate: Teammate, sub_messages: list) -> str:
-        """Poll for new messages and unclaimed tasks during idle.
-        Returns: "resume" (new work), "shutdown" (requested), or "timeout" (expired)."""
-        teammate.status = "idle"
-        teammate.idle_reason = IDLE_REASONS["no_tool_use"]
-
-        polls = IDLE_TIMEOUT // IDLE_POLL_INTERVAL
-        for i in range(polls):
-            if teammate.status == "shutdown":
-                return "shutdown"
-
-            # 1. Check inbox for messages
-            teammate.idle_reason = IDLE_REASONS["awaiting_messages"]
-            new_messages = self.check_inbox(teammate.name, teammate.team_name)
-            if new_messages:
-                result = self._handle_inbox_messages(teammate, new_messages, sub_messages)
-                if result == "shutdown":
-                    return "shutdown"
-                return "resume"
-
-            # 2. Scan for unclaimed tasks
-            teammate.idle_reason = IDLE_REASONS["awaiting_tasks"]
-            claimed = self._scan_unclaimed_tasks(teammate, sub_messages)
-            if claimed:
-                return "resume"
-
-            time.sleep(IDLE_POLL_INTERVAL)
-
-        teammate.idle_reason = IDLE_REASONS["timeout"]
-        return "timeout"
-
     def _handle_inbox_messages(self, teammate: Teammate, messages: list, sub_messages: list) -> str:
         """Process inbox messages. Returns "shutdown" if shutdown requested, else None."""
         for msg in messages:
             msg_type = msg.get("type", "message")
 
             if msg_type == "shutdown_request":
+                req_id = msg.get("request_id", "")
                 teammate.status = "shutdown"
+                # Echo back the request_id so the lead can correlate
+                if req_id:
+                    self.send_message(
+                        msg.get("sender", "lead"),
+                        f"Teammate '{teammate.name}' shutting down.",
+                        msg_type="shutdown_response",
+                        sender=teammate.name,
+                        request_id=req_id,
+                    )
                 self._update_team_config(teammate.team_name)
                 return "shutdown"
 
@@ -547,32 +450,69 @@ Complete work efficiently and report results clearly."""
             sub_messages.append({"role": "user", "content": msg_text})
         return None
 
-    def _scan_unclaimed_tasks(self, teammate: Teammate, sub_messages: list) -> bool:
-        """Scan the task board for unclaimed tasks. Returns True if a task was claimed."""
-        unclaimed = [t for t in TASK_MGR.list_all()
-                     if t.status == "pending" and not t.owner and not t.blocked_by]
-        if not unclaimed:
-            return False
-        return self._claim_task(teammate, unclaimed[0], sub_messages)
+    def _teammate_loop(self, teammate: Teammate, initial_prompt: str):
+        """
+        Teammate work cycle with inbox + task board coordination.
 
-    def _claim_task(self, teammate: Teammate, task, sub_messages: list) -> bool:
-        """Claim a task and inject it into conversation for the teammate to work on."""
-        TASK_MGR.update(task.id, status="in_progress", owner=teammate.name)
-        sub_messages.append({
-            "role": "user",
-            "content": f"Unclaimed task auto-claimed - #{task.id}: {task.subject}\n\n{task.description}"
-        })
-        return True
+        Processes initial prompt, checks inbox before each API call,
+        handles shutdown protocol with request_id tracking. Shuts down
+        when model stops calling tools or when shutdown_request received.
+        No idle phase or auto-claiming -- those come in v9.
+        """
+        color = teammate.color
+        reset = COLOR_RESET
+        prefix = f"{color}[{teammate.agent_id}]{reset}"
 
-    @staticmethod
-    def _reinject_identity(teammate: 'Teammate', sub_messages: list):
-        """After auto_compact, re-inject teammate identity so it remembers who it is."""
-        identity = (f"\n\nRemember: You are teammate '{teammate.name}' "
-                    f"({teammate.agent_id}) in team '{teammate.team_name}'.")
-        if sub_messages and sub_messages[0].get("role") == "user":
-            content = sub_messages[0].get("content", "")
-            if isinstance(content, str):
-                sub_messages[0]["content"] = content + identity
+        sub_system = f"""You are teammate '{teammate.name}' ({teammate.agent_id}) in team '{teammate.team_name}' at {WORKDIR}.
+
+Work on your assigned tasks. Use TaskList to find tasks.
+Use TaskGet to read task details before starting work.
+Use TaskUpdate to mark progress. Use SendMessage to communicate with teammates.
+Complete work efficiently and report results clearly."""
+
+        sub_tools = _get_teammate_tools()
+        sub_messages = [{"role": "user", "content": initial_prompt}]
+
+        while teammate.status != "shutdown":
+            teammate.status = "active"
+
+            try:
+                # Check for incoming messages before each turn
+                inbox_messages = self.check_inbox(teammate.name, teammate.team_name)
+                if inbox_messages:
+                    handled = self._handle_inbox_messages(teammate, inbox_messages, sub_messages)
+                    if handled == "shutdown":
+                        return
+
+                sub_messages = CTX.microcompact(sub_messages)
+                if CTX.should_compact(sub_messages):
+                    sub_messages = CTX.auto_compact(sub_messages)
+
+                response = client.messages.create(
+                    model=MODEL, system=sub_system,
+                    messages=sub_messages, tools=sub_tools, max_tokens=8000,
+                )
+
+                if response.stop_reason == "tool_use":
+                    tool_calls = [b for b in response.content if b.type == "tool_use"]
+                    results = []
+                    for tc in tool_calls:
+                        output = execute_tool(tc.name, tc.input)
+                        output = CTX.handle_large_output(output)
+                        results.append({"type": "tool_result", "tool_use_id": tc.id, "content": output})
+                    sub_messages.append({"role": "assistant", "content": response.content})
+                    sub_messages.append({"role": "user", "content": results})
+                    continue
+                else:
+                    # No more tool calls -- teammate work is done
+                    teammate.status = "shutdown"
+                    self._update_team_config(teammate.team_name)
+                    return
+
+            except Exception as e:
+                teammate.status = "shutdown"
+                self._update_team_config(teammate.team_name)
+                return
 
 
 TEAM_MGR = TeammateManager()
@@ -649,7 +589,6 @@ class BackgroundManager:
                 bg_task.output = f"Error: {e}"
                 bg_task.status = "error"
             finally:
-                # Write output to persistent file
                 output_path = self._write_output(task_id, bg_task.output)
                 bg_task.event.set()
                 self._notifications.put({
@@ -881,7 +820,6 @@ class ContextManager:
     - Disk transcript = long-term memory archive
     """
 
-    # Matches cli.js $UY set of compactable tool types
     COMPACTABLE_TOOLS = {"bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "notebook_edit"}
     KEEP_RECENT = 3
     TOKEN_THRESHOLD = auto_compact_threshold()
@@ -893,9 +831,6 @@ class ContextManager:
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
-        # cli.js H2: Math.round(A.length / q) with default divisor q=4
-        # Production cli.js also applies a 1.333x multiplier (Wp1) for
-        # message-level counting. Omitted here for teaching clarity.
         return len(text) // 4
 
     def microcompact(self, messages: list) -> list:
@@ -934,7 +869,6 @@ class ContextManager:
 
         if estimated_savings >= MIN_SAVINGS:
             for block in clearable:
-                # Matches cli.js wJA replacement string
                 block["content"] = "[Old tool result content cleared]"
 
         return messages
@@ -948,7 +882,7 @@ class ContextManager:
         """
         Layer 2: Summarize entire conversation, replace ALL messages.
 
-        Production cli.js auto_compact replaces the ENTIRE message list with:
+        Replaces the ENTIRE message list with:
         [user_summary_message, assistant_ack, ...restored_file_messages].
         There is no "keep last N messages" behavior in auto_compact.
         Only manual /compact can optionally preserve messages.
@@ -1200,13 +1134,13 @@ Loop: plan -> act with tools -> report.
 **Subagents available** (invoke with Task tool for focused subtasks):
 {get_agent_descriptions()}
 
-**Autonomous teammate system:**
+**Teammate system:**
 - Use TeamCreate to form a team for persistent collaboration
 - Spawn teammates via Task with team_name + name parameters
 - Teammates work independently in background threads
-- After finishing work, teammates idle and auto-claim unclaimed tasks
 - Communicate via SendMessage (point-to-point or broadcast)
 - Everyone shares the same task board (TaskCreate/TaskUpdate/TaskList)
+- Send shutdown_request to gracefully stop a teammate
 
 You can run tasks in background with run_in_background=true on Task/bash tools.
 Use TaskOutput to check results. Notifications arrive automatically when background tasks complete.
@@ -1313,7 +1247,7 @@ SEND_MESSAGE_TOOL = {
     "input_schema": {"type": "object", "properties": {
         "recipient": {"type": "string", "description": "Teammate name (or any name for broadcast)"},
         "content": {"type": "string"},
-        "type": {"type": "string", "enum": list(TeammateManager.MESSAGE_TYPES), "default": "message"},
+        "type": {"type": "string", "enum": list(MESSAGE_TYPES), "default": "message"},
         "summary": {"type": "string", "description": "5-10 word preview (required for message/broadcast)"},
         "request_id": {"type": "string", "description": "Correlation ID for shutdown protocol"},
         "team_name": {"type": "string", "description": "Team name (required for broadcast)"},
@@ -1640,7 +1574,7 @@ def agent_loop(messages: list) -> list:
 # =============================================================================
 
 def main():
-    print(f"Mini Claude Code v9 (Autonomous Teams) - {WORKDIR}")
+    print(f"Mini Claude Code v8c (Team Coordination) - {WORKDIR}")
     print(f"Skills: {', '.join(SKILLS.list_skills()) or 'none'}")
     print("Commands: /compact, /tasks, /team, exit")
     print()

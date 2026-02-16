@@ -156,22 +156,20 @@ def microcompact(self, messages):
 Key details:
 - Only the **content** is cleared. The tool call structure stays intact. The model still knows what it called, just cannot see old output.
 - Only blocks over 1000 tokens are considered for clearing.
-- Clearing is skipped entirely if estimated savings are below `MIN_SAVINGS` (20000 tokens, matching cli.js zUY=20000).
+- Clearing is skipped entirely if estimated savings are below `MIN_SAVINGS` (20000 tokens).
 
 ## Token Estimation
 
-Tokens are estimated using the character-based formula from cli.js:
+Tokens are estimated using a character-based formula:
 
 ```python
 @staticmethod
 def estimate_tokens(text: str) -> int:
-    # cli.js H2: Math.round(A.length / q) with default divisor q=4
-    # Production cli.js also applies a 1.333x multiplier (Wp1) for
-    # message-level counting. Omitted here for teaching clarity.
+    # ~4 characters per token
     return len(text) // 4
 ```
 
-This approximates 4 characters per token, matching the cli.js ground truth formula.
+This approximates 4 characters per token.
 
 ## Auto-Compact Threshold
 
@@ -194,7 +192,7 @@ Our simplified version teaches the core pattern with microcompact and auto-compa
 
 ## Auto-Compact: Replace ALL Messages
 
-Triggered when context exceeds the dynamic threshold. Production cli.js auto_compact replaces the ENTIRE message list -- there is no "keep last N messages" behavior:
+Triggered when context exceeds the dynamic threshold. auto_compact replaces the ENTIRE message list -- there is no "keep last N messages" behavior:
 
 ```python
 def auto_compact(self, messages):

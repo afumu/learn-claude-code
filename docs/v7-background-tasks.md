@@ -107,7 +107,7 @@ def wrapper():
     finally:
         output_path = self._write_output(task_id, bg_task.output)
         bg_task.event.set()           # Always signal completion
-        # Matches cli.js attachment pipeline for task notifications
+        # Push task completion notification
         self._notifications.put({
             "type": "attachment",
             "attachment": {
@@ -166,7 +166,7 @@ TaskStop(task_id="a3f7c2")
 
 ## Notification Drain/Inject Cycle
 
-The notification bus is implemented as a `queue.Queue`. The main agent loop performs a **drain-and-inject** cycle before every API call. Notifications use the attachment format matching cli.js:
+The notification bus is implemented as a `queue.Queue`. The main agent loop performs a **drain-and-inject** cycle before every API call. Notifications use the attachment format:
 
 ```python
 # 1. Drain: pull all pending notifications from the queue
@@ -194,7 +194,7 @@ Background task outputs are saved to disk at `.task_outputs/{task_id}.output`:
 OUTPUT_DIR = WORKDIR / ".task_outputs"
 
 def _write_output(self, task_id, content):
-    # cli.js jSA=32000 default, configurable up to 160000 via TASK_MAX_OUTPUT_LENGTH env var
+    # Default 32000, configurable up to 160000 via TASK_MAX_OUTPUT_LENGTH env var
     max_output_chars = int(os.getenv("TASK_MAX_OUTPUT_LENGTH", "32000"))
     path = OUTPUT_DIR / f"{task_id}.output"
     truncated = content[:max_output_chars]

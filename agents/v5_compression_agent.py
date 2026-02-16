@@ -20,7 +20,7 @@ the agent will hit the wall and crash.
             |
             v
     [Layer 1: Microcompact]         (silent, every turn)
-    Keep last 3 tool results.       mmY=3
+    Keep last 3 tool results.
     Clear older results with:
     "[Old tool result content cleared]"
     Only applies if estimated savings >= MIN_SAVINGS (20000 tokens).
@@ -35,7 +35,7 @@ the agent will hit the wall and crash.
               Summarize full conversation.
               Replace ALL messages with      (matches production behavior)
               [summary, ack, ...restored_files].
-              Restore up to 5 recent files.  Ba4=5
+              Restore up to 5 recent files.
                       |
                       v
               [Layer 3: Manual compact]      (user /compact)
@@ -98,7 +98,7 @@ def auto_compact_threshold(context_window: int = 200000, max_output: int = 16384
 
 
 # Microcompact savings threshold: only clear old tool results if estimated
-# savings >= this value. Matches cli.js zUY=20000.
+# savings >= this value.
 MIN_SAVINGS = 20000
 MAX_RESTORE_FILES = 5
 MAX_RESTORE_TOKENS_PER_FILE = 5000
@@ -118,7 +118,6 @@ class ContextManager:
     - Disk transcript = long-term memory archive
     """
 
-    # Matches cli.js $UY set of compactable tool types
     COMPACTABLE_TOOLS = {"bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "notebook_edit"}
     KEEP_RECENT = 3
     TOKEN_THRESHOLD = auto_compact_threshold()
@@ -130,9 +129,6 @@ class ContextManager:
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
-        # cli.js H2: Math.round(A.length / q) with default divisor q=4
-        # Production cli.js also applies a 1.333x multiplier (Wp1) for
-        # message-level counting. Omitted here for teaching clarity.
         return len(text) // 4
 
     def microcompact(self, messages: list) -> list:
@@ -171,7 +167,6 @@ class ContextManager:
 
         if estimated_savings >= MIN_SAVINGS:
             for block in clearable:
-                # Matches cli.js wJA replacement string
                 block["content"] = "[Old tool result content cleared]"
 
         return messages
@@ -185,7 +180,7 @@ class ContextManager:
         """
         Layer 2: Summarize entire conversation, replace ALL messages.
 
-        Production cli.js auto_compact replaces the ENTIRE message list with:
+        Replaces the ENTIRE message list with:
         [user_summary_message, assistant_ack, ...restored_file_messages].
         There is no "keep last N messages" behavior in auto_compact.
         Only manual /compact can optionally preserve messages.

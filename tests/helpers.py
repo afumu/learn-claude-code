@@ -11,6 +11,7 @@ import tempfile
 import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agents"))
 
 # Load .env from project root for local testing
 from dotenv import load_dotenv

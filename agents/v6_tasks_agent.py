@@ -133,8 +133,6 @@ class TaskManager:
         base_dir = tasks_dir or TASKS_DIR
         self.tasks_dir = base_dir / list_id if list_id != "default" else base_dir
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
-        # In-process threading.Lock for teaching simplicity. Production cli.js
-        # uses file-based locks (proper-lockfile) for cross-process safety.
         self._lock = threading.Lock()
         self._counter = self._load_counter()
 
@@ -314,7 +312,6 @@ class ContextManager:
     - Disk transcript = long-term memory archive
     """
 
-    # Matches cli.js $UY set of compactable tool types
     COMPACTABLE_TOOLS = {"bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "notebook_edit"}
     KEEP_RECENT = 3
     TOKEN_THRESHOLD = auto_compact_threshold()
@@ -326,9 +323,6 @@ class ContextManager:
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
-        # cli.js H2: Math.round(A.length / q) with default divisor q=4
-        # Production cli.js also applies a 1.333x multiplier (Wp1) for
-        # message-level counting. Omitted here for teaching clarity.
         return len(text) // 4
 
     def microcompact(self, messages: list) -> list:
@@ -367,7 +361,6 @@ class ContextManager:
 
         if estimated_savings >= MIN_SAVINGS:
             for block in clearable:
-                # Matches cli.js wJA replacement string
                 block["content"] = "[Old tool result content cleared]"
 
         return messages
@@ -381,7 +374,7 @@ class ContextManager:
         """
         Layer 2: Summarize entire conversation, replace ALL messages.
 
-        Production cli.js auto_compact replaces the ENTIRE message list with:
+        Replaces the ENTIRE message list with:
         [user_summary_message, assistant_ack, ...restored_file_messages].
         There is no "keep last N messages" behavior in auto_compact.
         Only manual /compact can optionally preserve messages.
@@ -873,7 +866,7 @@ def run_task_get(task_id: str) -> str:
 
 
 def run_task_update(task_id: str, **kwargs) -> str:
-    # status="deleted" triggers file removal (production cli.js deletes the file entirely).
+    # status="deleted" triggers file removal.
     # The stored Task schema only has: pending, in_progress, completed.
     if kwargs.get("status") == "deleted":
         if TASK_MGR.delete(task_id):

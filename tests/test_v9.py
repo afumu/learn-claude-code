@@ -284,7 +284,7 @@ def test_v9_system_prompt_mentions_autonomous():
 
 
 def test_idle_poll_interval_default():
-    """Verify IDLE_POLL_INTERVAL matches cli.js cZz=1000ms (1 second)."""
+    """Verify IDLE_POLL_INTERVAL is 1 second."""
     from v9_autonomous_agent import IDLE_POLL_INTERVAL
     assert IDLE_POLL_INTERVAL == 1, f"Expected 1s, got {IDLE_POLL_INTERVAL}s"
     print("PASS: test_idle_poll_interval_default")

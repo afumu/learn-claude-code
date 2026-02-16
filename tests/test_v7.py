@@ -322,7 +322,7 @@ def test_v7_notification_xml_construction():
     """Verify agent_loop constructs attachment notifications from drain results.
 
     The main agent loop formats notifications as attachment objects and injects
-    them into user messages, matching cli.js's attachment pipeline.
+    them into user messages, matching the attachment pipeline.
     """
     import inspect, v7_background_agent
     source = inspect.getsource(v7_background_agent.agent_loop)

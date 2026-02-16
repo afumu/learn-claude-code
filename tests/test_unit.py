@@ -8,6 +8,7 @@ import sys
 import importlib.util
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agents"))
 
 
 # =============================================================================
@@ -1824,7 +1825,7 @@ def test_v5_handle_large_output_at_boundary():
 
 
 def test_v5_keep_recent_constant():
-    """Verify KEEP_RECENT is 3 (matching cli.js mmY=3)."""
+    """Verify KEEP_RECENT is 3."""
     from v5_compression_agent import ContextManager
     cm = ContextManager()
     assert cm.KEEP_RECENT == 3, f"KEEP_RECENT should be 3, got {cm.KEEP_RECENT}"

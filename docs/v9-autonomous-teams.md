@@ -83,7 +83,7 @@ v9 Teammate (persistent with idle cycle):
 ## Autonomy Constants
 
 ```python
-IDLE_POLL_INTERVAL = 1     # seconds between idle polls (cli.js cZz=1000ms)
+IDLE_POLL_INTERVAL = 1     # seconds between idle polls
 IDLE_TIMEOUT = 60          # seconds before giving up on new work
 
 IDLE_REASONS = {
@@ -94,15 +94,15 @@ IDLE_REASONS = {
 }
 ```
 
-## Production vs Teaching Simplification
+## Implementation Notes
 
-| Aspect | Production cli.js | Our Teaching Version |
-|--------|------------------|---------------------|
-| Idle mechanism | Passive turn-level idle (agent waits for input injection) | Active polling loop (sleep 1s, check inbox/board) |
-| Auto-claiming | Prompt-driven (model calls TaskList + TaskUpdate) | Code-driven (`_scan_unclaimed_tasks()` in idle loop) |
-| Identity injection | Handled by system attachment pipeline | Explicit re-injection after `auto_compact` |
+| Aspect | Mechanism |
+|--------|-----------|
+| Idle mechanism | Active polling loop (sleep 1s, check inbox/board) |
+| Auto-claiming | Code-driven (`_scan_unclaimed_tasks()` in idle loop) |
+| Identity injection | Explicit re-injection after `auto_compact` |
 
-The teaching version uses active polling to make the idle/wake pattern explicit and observable. Production achieves the same effect through turn-level event injection.
+The active polling approach makes the idle/wake pattern explicit and observable. The same effect can also be achieved through turn-level event injection.
 
 ## The Full Teammate Loop
 
