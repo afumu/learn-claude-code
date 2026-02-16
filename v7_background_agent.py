@@ -251,6 +251,18 @@ BG = BackgroundManager()
 
 
 # =============================================================================
+# Queue Mode Editability
+# =============================================================================
+
+NON_EDITABLE_MODES = {"task-notification", "system-status"}
+
+
+def is_editable(mode: str) -> bool:
+    """Check if a queue mode allows editing. Task notifications are read-only."""
+    return mode not in NON_EDITABLE_MODES
+
+
+# =============================================================================
 # TaskManager (from v6)
 # =============================================================================
 

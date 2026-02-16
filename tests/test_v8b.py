@@ -440,6 +440,65 @@ def test_llm_team_workflow():
     return True
 
 
+def test_llm_targeted_dm():
+    """Model sends a direct message to a specific teammate."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    text, calls, _ = run_agent(
+        client,
+        "Send a direct message to teammate 'alice' saying 'Please review the PR'. "
+        "Use SendMessage with type='message' and recipient='alice'.",
+        V8B_TOOLS,
+        system="Use SendMessage to communicate with teammates. Set type='message' for direct messages.",
+        max_turns=5,
+    )
+
+    send_calls = [c for c in calls if c[0] == "SendMessage"]
+    assert len(send_calls) >= 1, f"Should use SendMessage, got: {[c[0] for c in calls]}"
+    first_send = send_calls[0][1]
+    assert first_send.get("type") == "message", (
+        f"Should be type 'message', got: {first_send.get('type')}"
+    )
+    assert first_send.get("recipient") == "alice", (
+        f"Should target 'alice', got: {first_send.get('recipient')}"
+    )
+
+    print(f"Tool calls: {len(calls)}, SendMessage: {len(send_calls)}")
+    print("PASS: test_llm_targeted_dm")
+    return True
+
+
+def test_llm_shutdown_via_message():
+    """Model sends a shutdown_request to a teammate."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    text, calls, _ = run_agent(
+        client,
+        "Send a shutdown request to teammate 'worker-1'. "
+        "Use SendMessage with type='shutdown_request' and recipient='worker-1'.",
+        V8B_TOOLS,
+        system="Use SendMessage with type='shutdown_request' to shut down teammates.",
+        max_turns=5,
+    )
+
+    send_calls = [c for c in calls if c[0] == "SendMessage"]
+    assert len(send_calls) >= 1, f"Should use SendMessage, got: {[c[0] for c in calls]}"
+    first_send = send_calls[0][1]
+    assert first_send.get("type") == "shutdown_request", (
+        f"Should be type 'shutdown_request', got: {first_send.get('type')}"
+    )
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_shutdown_via_message")
+    return True
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -466,4 +525,6 @@ if __name__ == "__main__":
         test_llm_sends_message,
         test_llm_broadcasts,
         test_llm_team_workflow,
+        test_llm_targeted_dm,
+        test_llm_shutdown_via_message,
     ]) else 1)

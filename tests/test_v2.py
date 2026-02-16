@@ -166,6 +166,15 @@ def test_nag_reminder_exists():
 # LLM tests
 # =============================================================================
 
+def _run_with_todo_tool(client, task, workdir=None):
+    """Run agent with TodoWrite tool and return results."""
+    tools = [BASH_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL, TODO_WRITE_TOOL]
+    system_prompt = (
+        "You are a coding agent that uses TodoWrite to plan work. "
+        "Always create a todo list before acting, and update it as you make progress."
+    )
+    return run_agent(client, task, tools, system=system_prompt, workdir=workdir, max_turns=15)
+
 def test_llm_plans_before_acting():
     """Give multi-step task, model uses TodoWrite BEFORE file tools."""
     client = get_client()
@@ -309,6 +318,55 @@ def test_llm_todo_with_errors():
     return True
 
 
+def test_llm_todo_tracks_completion_count():
+    """Model creates todos, does work, and updates completion status."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = _run_with_todo_tool(
+            client,
+            "Plan and execute: 1) create file a.txt with 'alpha', 2) create file b.txt with 'beta'. "
+            "First create a TodoWrite plan with both items as pending, then do the work, "
+            "then update the todo to mark both completed.",
+            workdir=tmpdir,
+        )
+
+        todo_calls = [c for c in calls if c[0] == "TodoWrite"]
+        assert len(todo_calls) >= 2, (
+            f"Should call TodoWrite at least twice (plan + update), got {len(todo_calls)}"
+        )
+
+    print(f"Tool calls: {len(calls)}, TodoWrite: {len(todo_calls)}")
+    print("PASS: test_llm_todo_tracks_completion_count")
+    return True
+
+
+def test_llm_todo_replan_on_error():
+    """Model adapts plan when encountering an error mid-execution."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = _run_with_todo_tool(
+            client,
+            f"Plan: 1) read file {tmpdir}/nonexistent.txt 2) create file {tmpdir}/output.txt with the content. "
+            "Use TodoWrite to plan first. When step 1 fails (file doesn't exist), "
+            "adapt: create output.txt with 'fallback content' instead. Update your todo accordingly.",
+            workdir=tmpdir,
+        )
+
+        assert len(calls) >= 2, f"Should make at least 2 tool calls, got {len(calls)}"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_todo_replan_on_error")
+    return True
+
+
 if __name__ == "__main__":
     sys.exit(0 if run_tests([
         test_todo_manager_basic,
@@ -321,4 +379,6 @@ if __name__ == "__main__":
         test_llm_updates_todo_progress,
         test_llm_multi_step_execution,
         test_llm_todo_with_errors,
+        test_llm_todo_tracks_completion_count,
+        test_llm_todo_replan_on_error,
     ]) else 1)

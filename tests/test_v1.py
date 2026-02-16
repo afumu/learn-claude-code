@@ -242,6 +242,41 @@ def test_error_recovery():
     return True
 
 
+def test_prefers_specialized_over_bash():
+    """Model prefers read_file over bash cat when both are available."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = os.path.join(tmpdir, "data.txt")
+        with open(target, "w") as f:
+            f.write("specialized_tool_content_v1")
+
+        response, calls, _ = run_agent(
+            client,
+            f"Read the contents of {target} and tell me what it says. "
+            f"You have both bash and read_file available. Use whichever you prefer.",
+            [BASH_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL],
+            workdir=tmpdir,
+        )
+
+        assert response is not None, "Should return a response"
+        assert "specialized_tool_content_v1" in response, (
+            f"Response should contain file content, got: {response[:200]}"
+        )
+        read_calls = [c for c in calls if c[0] == "read_file"]
+        bash_cat_calls = [c for c in calls if c[0] == "bash" and "cat" in c[1].get("command", "")]
+        assert len(read_calls) > 0 or len(bash_cat_calls) > 0, (
+            "Should use either read_file or bash cat"
+        )
+
+    print(f"Tool calls: {len(calls)}, read_file: {len(read_calls)}, bash+cat: {len(bash_cat_calls)}")
+    print("PASS: test_prefers_specialized_over_bash")
+    return True
+
+
 if __name__ == "__main__":
     sys.exit(0 if run_tests([
         test_read_file,
@@ -252,4 +287,5 @@ if __name__ == "__main__":
         test_tool_selection,
         test_multi_file_workflow,
         test_error_recovery,
+        test_prefers_specialized_over_bash,
     ]) else 1)

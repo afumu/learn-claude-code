@@ -100,11 +100,12 @@ def test_notifications_on_complete():
     notifications = bm.drain_notifications()
 
     assert len(notifications) >= 2, f"Expected >= 2 notifications, got {len(notifications)}"
-    notif_ids = {n["task_id"] for n in notifications}
+    notif_ids = {n["attachment"]["task_id"] for n in notifications}
     assert id1 in notif_ids, f"Missing notification for task {id1}"
     assert id2 in notif_ids, f"Missing notification for task {id2}"
     for n in notifications:
-        assert n["status"] == "completed", f"Notification status should be 'completed', got '{n['status']}'"
+        att = n["attachment"]
+        assert att["status"] == "completed", f"Notification status should be 'completed', got '{att['status']}'"
 
     empty = bm.drain_notifications()
     assert len(empty) == 0, "Drain should return empty after first drain"
@@ -136,10 +137,10 @@ def test_error_propagation():
 
     time.sleep(0.1)
     notifications = bm.drain_notifications()
-    error_notifs = [n for n in notifications if n["task_id"] == task_id]
+    error_notifs = [n for n in notifications if n["attachment"]["task_id"] == task_id]
     assert len(error_notifs) == 1, f"Expected 1 error notification, got {len(error_notifs)}"
-    assert error_notifs[0]["status"] == "error", \
-        f"Notification status should be 'error', got '{error_notifs[0]['status']}'"
+    assert error_notifs[0]["attachment"]["status"] == "error", \
+        f"Notification status should be 'error', got '{error_notifs[0]['attachment']['status']}'"
     print("PASS: test_error_propagation")
     return True
 
@@ -155,18 +156,20 @@ def test_notification_format():
     assert len(notifications) >= 1, f"Expected >= 1 notification, got {len(notifications)}"
 
     for n in notifications:
-        assert "task_id" in n, f"Notification missing 'task_id': {n}"
-        assert "status" in n, f"Notification missing 'status': {n}"
-        assert "summary" in n, f"Notification missing 'summary': {n}"
-        assert isinstance(n["task_id"], str), f"task_id should be str, got {type(n['task_id'])}"
-        assert isinstance(n["status"], str), f"status should be str, got {type(n['status'])}"
-        assert isinstance(n["summary"], str), f"summary should be str, got {type(n['summary'])}"
-        assert len(n["summary"]) <= 500, \
-            f"summary should be truncated to <=500 chars, got {len(n['summary'])}"
+        assert "attachment" in n, f"Notification missing 'attachment': {n}"
+        att = n["attachment"]
+        assert "task_id" in att, f"Attachment missing 'task_id': {att}"
+        assert "status" in att, f"Attachment missing 'status': {att}"
+        assert "summary" in att, f"Attachment missing 'summary': {att}"
+        assert isinstance(att["task_id"], str), f"task_id should be str, got {type(att['task_id'])}"
+        assert isinstance(att["status"], str), f"status should be str, got {type(att['status'])}"
+        assert isinstance(att["summary"], str), f"summary should be str, got {type(att['summary'])}"
+        assert len(att["summary"]) <= 500, \
+            f"summary should be truncated to <=500 chars, got {len(att['summary'])}"
 
-    target = [n for n in notifications if n["task_id"] == task_id][0]
-    assert len(target["summary"]) == 500, \
-        f"1000-char output should produce a 500-char summary, got {len(target['summary'])}"
+    target = [n for n in notifications if n["attachment"]["task_id"] == task_id][0]
+    assert len(target["attachment"]["summary"]) == 500, \
+        f"1000-char output should produce a 500-char summary, got {len(target['attachment']['summary'])}"
     print("PASS: test_notification_format")
     return True
 
@@ -316,18 +319,18 @@ def test_v7_timeout_on_blocking_get():
 
 
 def test_v7_notification_xml_construction():
-    """Verify agent_loop constructs proper <task-notification> XML from drain results.
+    """Verify agent_loop constructs attachment notifications from drain results.
 
-    The main agent loop formats notifications as XML blocks and injects them
-    into user messages. This verifies the format matches what the model expects.
+    The main agent loop formats notifications as attachment objects and injects
+    them into user messages, matching cli.js's attachment pipeline.
     """
     import inspect, v7_background_agent
     source = inspect.getsource(v7_background_agent.agent_loop)
 
-    assert "task-notification" in source, \
-        "agent_loop must construct <task-notification> XML blocks"
-    assert "task-id" in source, \
-        "XML must include <task-id> element"
+    assert "attachment" in source, \
+        "agent_loop must handle attachment-format notifications"
+    assert "notification" in source.lower(), \
+        "agent_loop must reference notifications"
     assert "drain_notifications" in source, \
         "agent_loop must call drain_notifications"
 
@@ -348,10 +351,10 @@ def test_v7_summary_truncation():
 
     time.sleep(0.1)
     notifications = bm.drain_notifications()
-    target = [n for n in notifications if n["task_id"] == task_id]
+    target = [n for n in notifications if n["attachment"]["task_id"] == task_id]
     assert len(target) == 1, f"Expected 1 notification for task, got {len(target)}"
-    assert len(target[0]["summary"]) == 500, \
-        f"Summary should be exactly 500 chars, got {len(target[0]['summary'])}"
+    assert len(target[0]["attachment"]["summary"]) == 500, \
+        f"Summary should be exactly 500 chars, got {len(target[0]['attachment']['summary'])}"
 
     print("PASS: test_v7_summary_truncation")
     return True
@@ -411,15 +414,21 @@ def test_editable_queue_mode():
 
 
 def test_notification_xml_all_tags():
-    """Verify notification XML output contains all 6 required XML tags."""
+    """Verify notification attachment contains all required fields.
+
+    The BackgroundManager pushes attachment-format notifications with
+    task_status type containing task_id, task_type, status, summary,
+    and output_file fields.
+    """
     import inspect, v7_background_agent
-    source = inspect.getsource(v7_background_agent.agent_loop)
-    required_tags = [
-        "task-notification", "task-id", "task-type",
-        "status", "summary", "output-file"
+    source = inspect.getsource(v7_background_agent.BackgroundManager.run_in_background)
+    required_fields = [
+        "attachment", "task_status", "task_id", "task_type",
+        "status", "summary", "output_file"
     ]
-    for tag in required_tags:
-        assert tag in source, f"agent_loop notification XML missing <{tag}> tag"
+    for field_name in required_fields:
+        assert field_name in source, \
+            f"run_in_background notification missing '{field_name}' field"
     print("PASS: test_notification_xml_all_tags")
     return True
 
@@ -427,15 +436,17 @@ def test_notification_xml_all_tags():
 def test_output_file_append():
     """Write twice to output file, verify both chunks present."""
     from v7_background_agent import BackgroundManager
+    import v7_background_agent
     bm = BackgroundManager()
+    # Clean up before test to avoid stale data
+    output_path = v7_background_agent.OUTPUT_DIR / "test_append.output"
+    output_path.unlink(missing_ok=True)
     bm._write_output("test_append", "chunk1\n")
     bm._write_output("test_append", "chunk2\n")
     content = bm.read_output("test_append")
     assert "chunk1" in content, "First chunk should be present"
     assert "chunk2" in content, "Second chunk should be present"
     # Cleanup
-    import v7_background_agent
-    output_path = v7_background_agent.OUTPUT_DIR / "test_append.txt"
     output_path.unlink(missing_ok=True)
     print("PASS: test_output_file_append")
     return True
@@ -444,15 +455,17 @@ def test_output_file_append():
 def test_output_file_incremental_read():
     """Write, read with offset, verify only new content returned."""
     from v7_background_agent import BackgroundManager
+    import v7_background_agent
     bm = BackgroundManager()
+    # Clean up before test to avoid stale data
+    output_path = v7_background_agent.OUTPUT_DIR / "test_incr.output"
+    output_path.unlink(missing_ok=True)
     bm._write_output("test_incr", "AAAA")
     bm._write_output("test_incr", "BBBB")
     # Read with offset=4 should skip first "AAAA"
     result = bm.read_output("test_incr", offset=4)
     assert result == "BBBB", f"Expected 'BBBB', got '{result}'"
     # Cleanup
-    import v7_background_agent
-    output_path = v7_background_agent.OUTPUT_DIR / "test_incr.txt"
     output_path.unlink(missing_ok=True)
     print("PASS: test_output_file_incremental_read")
     return True
@@ -474,13 +487,13 @@ def test_background_task_error_recovery():
 
     time.sleep(0.1)
     notifications = bm.drain_notifications()
-    error_notifs = [n for n in notifications if n["task_id"] == task_id]
+    error_notifs = [n for n in notifications if n["attachment"]["task_id"] == task_id]
     assert len(error_notifs) == 1, \
         f"Expected 1 error notification, got {len(error_notifs)}"
-    assert error_notifs[0]["status"] == "error", \
-        f"Notification status should be 'error', got '{error_notifs[0]['status']}'"
-    assert "test failure" in error_notifs[0]["summary"], \
-        f"Notification summary should contain error info, got '{error_notifs[0]['summary']}'"
+    assert error_notifs[0]["attachment"]["status"] == "error", \
+        f"Notification status should be 'error', got '{error_notifs[0]['attachment']['status']}'"
+    assert "test failure" in error_notifs[0]["attachment"]["summary"], \
+        f"Notification summary should contain error info, got '{error_notifs[0]['attachment']['summary']}'"
 
     print("PASS: test_background_task_error_recovery")
     return True
@@ -493,6 +506,10 @@ def test_output_file_incremental_read_offset():
     bm = BackgroundManager()
 
     test_id = "test_offset_read"
+    # Clean up before test to avoid stale data
+    output_path = v7_background_agent.OUTPUT_DIR / f"{test_id}.output"
+    output_path.unlink(missing_ok=True)
+
     bm._write_output(test_id, "ABCDEFGHIJ")
 
     # Read full content (offset=0)
@@ -513,7 +530,6 @@ def test_output_file_incremental_read_offset():
     assert new_data == "KLMNO", f"After append, offset=10 expected 'KLMNO', got '{new_data}'"
 
     # Cleanup
-    output_path = v7_background_agent.OUTPUT_DIR / f"{test_id}.txt"
     output_path.unlink(missing_ok=True)
     print("PASS: test_output_file_incremental_read_offset")
     return True
@@ -656,6 +672,75 @@ def test_llm_file_task():
     return True
 
 
+def test_llm_monitors_background_result():
+    """Model uses TaskOutput to check a completed background task."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    ctx = {
+        "background_tasks": {
+            "b1": {"task_id": "b1", "status": "completed", "output": "Analysis complete: found 3 issues"}
+        }
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = run_agent(
+            client,
+            "A background task with ID 'b1' has been running. "
+            "Use the TaskOutput tool with task_id='b1' to check its result, "
+            "then tell me what it found.",
+            V7_TOOLS,
+            system="Use TaskOutput to retrieve results from background tasks.",
+            workdir=tmpdir,
+            max_turns=5,
+            ctx=ctx,
+        )
+
+        output_calls = [c for c in calls if c[0] == "TaskOutput"]
+        assert len(output_calls) >= 1, (
+            f"Should use TaskOutput to check result, got: {[c[0] for c in calls]}"
+        )
+
+    print(f"Tool calls: {len(calls)}, TaskOutput: {len(output_calls)}")
+    print("PASS: test_llm_monitors_background_result")
+    return True
+
+
+def test_llm_stop_then_retry():
+    """Model stops a background task and starts a new approach."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    ctx = {
+        "background_tasks": {
+            "b2": {"task_id": "b2", "status": "running", "output": "Still processing..."}
+        }
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = run_agent(
+            client,
+            "Background task 'b2' is taking too long. "
+            "Use TaskStop to stop it (task_id='b2'), then use bash to run 'echo task_retry_success' as the alternative approach.",
+            V7_TOOLS,
+            system="Use TaskStop to stop tasks, bash for alternative approaches.",
+            workdir=tmpdir,
+            max_turns=10,
+            ctx=ctx,
+        )
+
+        tool_names = [c[0] for c in calls]
+        assert "TaskStop" in tool_names, f"Should use TaskStop, got: {tool_names}"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_stop_then_retry")
+    return True
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -700,4 +785,7 @@ if __name__ == "__main__":
         test_llm_uses_task_stop,
         test_llm_background_workflow,
         test_llm_file_task,
+        # LLM background-specific
+        test_llm_monitors_background_result,
+        test_llm_stop_then_retry,
     ]) else 1)

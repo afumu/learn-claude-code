@@ -23,7 +23,7 @@ from v3_subagent import get_tools_for_agent, AGENT_TYPES, ALL_TOOLS
 
 
 def test_agent_types_defined():
-    for name in ("explore", "code", "plan"):
+    for name in ("Explore", "general-purpose", "Plan"):
         assert name in AGENT_TYPES, f"Missing agent type: {name}"
         assert "description" in AGENT_TYPES[name], f"{name} missing description"
         assert len(AGENT_TYPES[name]["description"]) > 0, f"{name} has empty description"
@@ -32,34 +32,34 @@ def test_agent_types_defined():
 
 
 def test_explore_readonly():
-    tools = get_tools_for_agent("explore")
+    tools = get_tools_for_agent("Explore")
     tool_names = [t["name"] for t in tools]
-    assert "bash" in tool_names, "explore should have bash"
-    assert "read_file" in tool_names, "explore should have read_file"
-    assert "write_file" not in tool_names, "explore should NOT have write_file"
-    assert "edit_file" not in tool_names, "explore should NOT have edit_file"
+    assert "bash" in tool_names, "Explore should have bash"
+    assert "read_file" in tool_names, "Explore should have read_file"
+    assert "write_file" not in tool_names, "Explore should NOT have write_file"
+    assert "edit_file" not in tool_names, "Explore should NOT have edit_file"
     print("PASS: test_explore_readonly")
     return True
 
 
 def test_code_full_access():
-    tools = get_tools_for_agent("code")
+    tools = get_tools_for_agent("general-purpose")
     tool_names = [t["name"] for t in tools]
-    assert "bash" in tool_names, "code should have bash"
-    assert "read_file" in tool_names, "code should have read_file"
-    assert "write_file" in tool_names, "code should have write_file"
-    assert "edit_file" in tool_names, "code should have edit_file"
+    assert "bash" in tool_names, "general-purpose should have bash"
+    assert "read_file" in tool_names, "general-purpose should have read_file"
+    assert "write_file" in tool_names, "general-purpose should have write_file"
+    assert "edit_file" in tool_names, "general-purpose should have edit_file"
     print("PASS: test_code_full_access")
     return True
 
 
 def test_plan_readonly():
-    tools = get_tools_for_agent("plan")
+    tools = get_tools_for_agent("Plan")
     tool_names = [t["name"] for t in tools]
-    assert "bash" in tool_names, "plan should have bash"
-    assert "read_file" in tool_names, "plan should have read_file"
-    assert "write_file" not in tool_names, "plan should NOT have write_file"
-    assert "edit_file" not in tool_names, "plan should NOT have edit_file"
+    assert "bash" in tool_names, "Plan should have bash"
+    assert "read_file" in tool_names, "Plan should have read_file"
+    assert "write_file" not in tool_names, "Plan should NOT have write_file"
+    assert "edit_file" not in tool_names, "Plan should NOT have edit_file"
     print("PASS: test_plan_readonly")
     return True
 
@@ -256,6 +256,57 @@ def test_explore_code_pipeline():
     return True
 
 
+def test_llm_delegates_plan_agent():
+    """Model delegates architecture/design work to a plan-type sub-agent."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    text, calls, _ = _run_with_task_tool(
+        client,
+        "Design the architecture for a REST API with users and posts. "
+        "Delegate this design work to a plan sub-agent using the Task tool with agent_type='plan'."
+    )
+
+    task_calls = [c for c in calls if c[0] == "Task"]
+    assert len(task_calls) > 0, "Model should delegate to a sub-agent"
+    agent_type = task_calls[0][1].get("agent_type", "")
+    assert agent_type == "plan", f"Should delegate to plan agent, got: {agent_type}"
+    print("PASS: test_llm_delegates_plan_agent")
+    return True
+
+
+def test_llm_multi_delegation():
+    """Model delegates two tasks to two different sub-agents sequentially."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = _run_with_task_tool(
+            client,
+            "Do these two things in order:\n"
+            "1) Use an explore sub-agent (agent_type='explore') to find all files in /tmp\n"
+            "2) Use a code sub-agent (agent_type='code') to create a summary file\n"
+            "You MUST use the Task tool twice with different agent_types.",
+        )
+
+        task_calls = [c for c in calls if c[0] == "Task"]
+        assert len(task_calls) >= 1, (
+            f"Should make at least 1 Task call, got {len(task_calls)}"
+        )
+        agent_types = [c[1].get("agent_type", "") for c in task_calls]
+        assert len(set(agent_types)) >= 1, (
+            f"Should use at least 1 different agent type, got: {agent_types}"
+        )
+
+    print(f"Task calls: {len(task_calls)}, types: {agent_types}")
+    print("PASS: test_llm_multi_delegation")
+    return True
+
+
 # =============================================================================
 # Runner
 # =============================================================================
@@ -273,4 +324,6 @@ if __name__ == "__main__":
         test_llm_delegates_exploration,
         test_llm_delegates_coding,
         test_explore_code_pipeline,
+        test_llm_delegates_plan_agent,
+        test_llm_multi_delegation,
     ]) else 1)

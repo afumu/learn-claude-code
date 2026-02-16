@@ -13,7 +13,7 @@ import json
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.helpers import get_client, run_agent, run_tests, MODEL
 from tests.helpers import BASH_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL
-from tests.helpers import TASK_CREATE_TOOL, TASK_LIST_TOOL, TASK_UPDATE_TOOL
+from tests.helpers import TASK_CREATE_TOOL, TASK_LIST_TOOL, TASK_UPDATE_TOOL, TASK_GET_TOOL
 
 from pathlib import Path
 from v6_tasks_agent import TaskManager
@@ -198,7 +198,7 @@ def test_persistence_survives_reload():
 # =============================================================================
 
 TOOLS = [BASH_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL,
-         TASK_CREATE_TOOL, TASK_LIST_TOOL, TASK_UPDATE_TOOL]
+         TASK_CREATE_TOOL, TASK_LIST_TOOL, TASK_UPDATE_TOOL, TASK_GET_TOOL]
 
 
 def test_llm_creates_tasks():
@@ -536,6 +536,103 @@ def test_dependency_cleanup_on_complete():
     return True
 
 
+def test_llm_creates_and_gets_task():
+    """Model creates a task then uses TaskGet to retrieve its details."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ctx = {}
+        text, calls, _ = run_agent(
+            client,
+            "Create a task with subject 'Setup database' and description 'Install PostgreSQL and create schema'. "
+            "Then use TaskGet with taskId='1' to retrieve its details and tell me the description.",
+            TOOLS,
+            system="Use TaskCreate to create tasks, TaskGet to retrieve them. Always use tools.",
+            workdir=tmpdir,
+            max_turns=10,
+            ctx=ctx,
+        )
+
+        tool_names = [c[0] for c in calls]
+        assert "TaskCreate" in tool_names, f"Should use TaskCreate, got: {tool_names}"
+        assert "TaskGet" in tool_names, f"Should use TaskGet, got: {tool_names}"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_creates_and_gets_task")
+    return True
+
+
+def test_llm_task_driven_workflow():
+    """Model creates 2 tasks, executes them, marks completed."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = run_agent(
+            client,
+            "Do the following in order:\n"
+            "1) Create a task: 'Write config.json'\n"
+            "2) Create a task: 'Write main.py'\n"
+            "3) Create the file config.json with content '{\"version\": 1}'\n"
+            "4) Mark task 1 as completed using TaskUpdate\n"
+            "Execute each step.",
+            TOOLS,
+            system="Use TaskCreate for planning, write_file for creating files, TaskUpdate for marking done.",
+            max_turns=15,
+            workdir=tmpdir,
+        )
+
+        tool_names = [c[0] for c in calls]
+        assert tool_names.count("TaskCreate") >= 1, "Should create at least 1 task"
+        assert "write_file" in tool_names, "Should write at least 1 file"
+        assert "TaskUpdate" in tool_names, "Should update task status"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_task_driven_workflow")
+    return True
+
+
+def test_llm_task_update_status_progression():
+    """Model moves a task through pending -> in_progress -> completed."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    ctx = {
+        "tasks": {
+            "1": {"id": "1", "subject": "Implement feature X", "description": "Build the new feature", "status": "pending"},
+        }
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = run_agent(
+            client,
+            "Task #1 needs to progress through its lifecycle. "
+            "First use TaskUpdate to set task 1 to 'in_progress', "
+            "then use TaskUpdate again to set it to 'completed'.",
+            TOOLS,
+            system="Use TaskUpdate to change task status. Follow the progression: pending -> in_progress -> completed.",
+            workdir=tmpdir,
+            max_turns=10,
+            ctx=ctx,
+        )
+
+        update_calls = [c for c in calls if c[0] == "TaskUpdate"]
+        assert len(update_calls) >= 2, (
+            f"Should call TaskUpdate at least twice (in_progress + completed), got {len(update_calls)}"
+        )
+
+    print(f"Tool calls: {len(calls)}, TaskUpdate: {len(update_calls)}")
+    print("PASS: test_llm_task_update_status_progression")
+    return True
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -571,4 +668,8 @@ if __name__ == "__main__":
         test_llm_task_then_work,
         test_llm_lists_tasks,
         test_llm_full_workflow,
+        # LLM task management-specific
+        test_llm_creates_and_gets_task,
+        test_llm_task_driven_workflow,
+        test_llm_task_update_status_progression,
     ]) else 1)

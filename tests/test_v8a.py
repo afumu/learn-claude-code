@@ -406,6 +406,95 @@ def test_llm_team_lifecycle():
     return True
 
 
+def test_llm_team_then_tasks():
+    """Model creates team, then creates tasks for the team."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    text, calls, _ = run_agent(
+        client,
+        "Do the following in order:\n"
+        "1) Create a team called 'backend-team' using TeamCreate\n"
+        "2) Create a task 'Design database schema' using TaskCreate\n"
+        "3) Create a task 'Implement API endpoints' using TaskCreate\n"
+        "Execute all three steps.",
+        V8A_TOOLS,
+        system="You are a team lead. Use TeamCreate for teams, TaskCreate for tasks.",
+        max_turns=10,
+    )
+
+    tool_names = [c[0] for c in calls]
+    assert "TeamCreate" in tool_names, f"Should use TeamCreate, got: {tool_names}"
+    assert tool_names.count("TaskCreate") >= 1, f"Should create at least 1 task"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_team_then_tasks")
+    return True
+
+
+def test_llm_team_with_task_output():
+    """Model creates team and checks a background task output."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    ctx = {
+        "background_tasks": {
+            "b1": {"task_id": "b1", "status": "completed", "output": "Build succeeded"}
+        }
+    }
+
+    text, calls, _ = run_agent(
+        client,
+        "1) Create a team called 'build-team' using TeamCreate\n"
+        "2) Check the result of background task 'b1' using TaskOutput\n"
+        "Execute both steps.",
+        V8A_TOOLS,
+        system="Use TeamCreate for teams, TaskOutput for checking background results.",
+        max_turns=10,
+        ctx=ctx,
+    )
+
+    tool_names = [c[0] for c in calls]
+    assert "TeamCreate" in tool_names, f"Should use TeamCreate, got: {tool_names}"
+    assert "TaskOutput" in tool_names, f"Should use TaskOutput, got: {tool_names}"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_team_with_task_output")
+    return True
+
+
+def test_llm_team_create_delete_cycle():
+    """Model creates team, lists tasks, then deletes team."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    text, calls, _ = run_agent(
+        client,
+        "Do the following in order:\n"
+        "1) Create a team called 'temp-cycle-team' using TeamCreate\n"
+        "2) List all tasks using TaskList\n"
+        "3) Delete the team using TeamDelete\n"
+        "Execute all steps.",
+        V8A_TOOLS,
+        system="Use TeamCreate, TaskList, and TeamDelete tools.",
+        max_turns=10,
+    )
+
+    tool_names = [c[0] for c in calls]
+    assert "TeamCreate" in tool_names, f"Should use TeamCreate, got: {tool_names}"
+    assert "TeamDelete" in tool_names, f"Should use TeamDelete, got: {tool_names}"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_team_create_delete_cycle")
+    return True
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -437,4 +526,7 @@ if __name__ == "__main__":
         # LLM integration
         test_llm_creates_team,
         test_llm_team_lifecycle,
+        test_llm_team_then_tasks,
+        test_llm_team_with_task_output,
+        test_llm_team_create_delete_cycle,
     ]) else 1)

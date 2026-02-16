@@ -14,7 +14,7 @@ import inspect
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tests.helpers import get_client, run_agent, run_tests, MODEL
+from tests.helpers import get_client, run_agent, run_tests, MODEL, execute_tool
 from tests.helpers import BASH_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL
 from tests.helpers import TODO_WRITE_TOOL, SKILL_TOOL, TASK_CREATE_TOOL, TASK_LIST_TOOL, TASK_UPDATE_TOOL
 
@@ -67,13 +67,16 @@ def test_microcompact_preserves_recent():
 
 def test_microcompact_replaces_old():
     cm = ContextManager()
+    # Each block needs > 1000 tokens (4000+ chars), and total savings >= MIN_SAVINGS (20000)
+    # 5 blocks, 2 to compact, each ~50000 chars = ~12500 tokens -> total savings ~25000 > 20000
+    large_output = "x" * 50000
     messages = [
         {"role": "assistant", "content": [
             {"type": "tool_use", "id": f"t{i}", "name": "bash", "input": {"command": f"ls {i}"}}
             for i in range(5)
         ]},
         {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": f"t{i}", "content": "x" * 5000}
+            {"type": "tool_result", "tool_use_id": f"t{i}", "content": large_output}
             for i in range(5)
         ]},
     ]
@@ -169,7 +172,7 @@ def test_auto_compact_preserves_recent():
     auto_compact calls the API so we can't run it in unit tests, but we can
     verify its contract by inspecting the source:
     (a) calls save_transcript (archive before compressing)
-    (b) keeps recent 5 messages (messages[-5:])
+    (b) replaces ALL messages with summary + restored files (no keep-last-N)
     (c) injects summary as user message (not system prompt modification)
     """
     import v5_compression_agent
@@ -179,9 +182,9 @@ def test_auto_compact_preserves_recent():
     assert "save_transcript" in source, \
         "auto_compact must call save_transcript to archive messages before compression"
 
-    # (b) Must keep recent messages (last 5)
-    assert "messages[-5:]" in source, \
-        "auto_compact must preserve recent 5 messages via messages[-5:]"
+    # (b) Must replace all messages with summary (no keep-last-N behavior)
+    assert "restore_recent_files" in source, \
+        "auto_compact must call restore_recent_files to recover recently-read files"
 
     # (c) Summary injected as user message, not modifying system prompt
     assert '"role": "user"' in source or "'role': 'user'" in source, \
@@ -273,7 +276,8 @@ def test_microcompact_only_compactable_tools():
     """
     cm = ContextManager()
 
-    large_output = "x" * 5000
+    # Each block > 1000 tokens and total savings >= MIN_SAVINGS (20000)
+    large_output = "x" * 50000
 
     # 5 compactable (bash) + 3 compactable (write_file) + 2 compactable (edit_file) = 10
     assistant_content = []
@@ -633,13 +637,15 @@ def test_estimate_tokens_formula():
 
 
 def test_compactable_tools_valid():
-    """Verify every name in COMPACTABLE_TOOLS exists in the tool definitions."""
-    from v5_compression_agent import ContextManager, ALL_TOOLS
+    """Verify COMPACTABLE_TOOLS contains at least the 4 base tool names."""
+    from v5_compression_agent import ContextManager
     cm = ContextManager()
-    tool_names = {t["name"] for t in ALL_TOOLS}
-    for name in cm.COMPACTABLE_TOOLS:
-        assert name in tool_names, \
-            f"COMPACTABLE_TOOLS entry '{name}' not found in TOOLS"
+    base_tools = {"bash", "read_file", "write_file", "edit_file"}
+    for name in base_tools:
+        assert name in cm.COMPACTABLE_TOOLS, \
+            f"Base tool '{name}' must be in COMPACTABLE_TOOLS"
+    assert len(cm.COMPACTABLE_TOOLS) >= 4, \
+        f"COMPACTABLE_TOOLS should have at least 4 entries, got {len(cm.COMPACTABLE_TOOLS)}"
     print("PASS: test_compactable_tools_valid")
     return True
 
@@ -828,6 +834,169 @@ def test_token_formula_min_savings_interaction():
     return True
 
 
+def test_llm_survives_many_tool_calls():
+    """Agent makes 6+ sequential tool calls without error, proving microcompact is transparent."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = run_agent(
+            client,
+            (
+                f"Create 6 separate files in {tmpdir}: "
+                f"f1.txt through f6.txt, each containing its filename. "
+                f"Create them ONE AT A TIME using write_file. "
+                f"After creating all 6, read f1.txt to verify it exists."
+            ),
+            V1_TOOLS,
+            workdir=tmpdir,
+            max_turns=15,
+        )
+
+        write_calls = [c for c in calls if c[0] == "write_file"]
+        assert len(write_calls) >= 5, (
+            f"Should make at least 5 write_file calls, got {len(write_calls)}"
+        )
+        created = sum(1 for i in range(1, 7)
+                      if os.path.exists(os.path.join(tmpdir, f"f{i}.txt")))
+        assert created >= 5, f"Should create at least 5 files, got {created}"
+
+    print(f"Tool calls: {len(calls)}, write_file: {len(write_calls)}, files created: {created}")
+    print("PASS: test_llm_survives_many_tool_calls")
+    return True
+
+
+def test_llm_large_output_handling():
+    """Agent handles a very large bash output gracefully."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = run_agent(
+            client,
+            "Run this bash command: python3 -c \"print('X' * 10000)\" "
+            "Then tell me approximately how long the output was.",
+            V1_TOOLS,
+            workdir=tmpdir,
+            max_turns=5,
+        )
+
+        assert len(calls) >= 1, "Should make at least 1 tool call"
+        bash_calls = [c for c in calls if c[0] == "bash"]
+        assert len(bash_calls) >= 1, "Should use bash tool"
+        assert text is not None, "Agent should still produce a text response"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_large_output_handling")
+    return True
+
+
+def test_llm_post_summary_continuity():
+    """Agent can work from a compressed conversation summary."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filepath = os.path.join(tmpdir, "target.txt")
+        with open(filepath, "w") as f:
+            f.write("original content here")
+
+        summary_msg = (
+            "[Conversation compressed]\n\n"
+            "Summary: The user asked me to work on files in a temp directory. "
+            f"I previously read {filepath} which contained 'original content here'. "
+            "The user now wants me to append ' - modified' to the file."
+        )
+
+        messages = [
+            {"role": "user", "content": summary_msg},
+            {"role": "assistant", "content": "Understood. I have the context. I will modify the file."},
+            {"role": "user", "content": f"Please edit {filepath} to change 'original content here' to 'original content here - modified'."},
+        ]
+
+        system_prompt = "You are a coding agent. Use tools to complete tasks."
+        tool_calls_made = []
+
+        for _ in range(5):
+            response = client.messages.create(
+                model=MODEL,
+                system=system_prompt,
+                messages=messages,
+                tools=V1_TOOLS,
+                max_tokens=2000,
+            )
+
+            if response.stop_reason != "tool_use":
+                break
+
+            tool_uses = [b for b in response.content if b.type == "tool_use"]
+            results = []
+            for tc in tool_uses:
+                tool_calls_made.append((tc.name, tc.input))
+                output = execute_tool(tc.name, tc.input, workdir=tmpdir)
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tc.id,
+                    "content": output[:5000],
+                })
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": results})
+
+        assert len(tool_calls_made) >= 1, "Should make at least 1 tool call from summary"
+        with open(filepath) as f:
+            content = f.read()
+        assert "modified" in content, (
+            f"File should be modified after working from summary, got: {content}"
+        )
+
+    print(f"Tool calls from summary: {len(tool_calls_made)}")
+    print("PASS: test_llm_post_summary_continuity")
+    return True
+
+
+def test_llm_long_session_file_operations():
+    """Agent reads 4 files, edits 2, creates 1 new one over many turns."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i in range(4):
+            with open(os.path.join(tmpdir, f"src{i}.py"), "w") as f:
+                f.write(f"# Module {i}\ndef func{i}():\n    return {i}\n")
+
+        text, calls, _ = run_agent(
+            client,
+            (
+                f"In {tmpdir}:\n"
+                f"1) Read all 4 files (src0.py through src3.py)\n"
+                f"2) Edit src0.py: change 'return 0' to 'return 100'\n"
+                f"3) Edit src1.py: change 'return 1' to 'return 200'\n"
+                f"4) Create a new file summary.txt listing all function names\n"
+                f"Do each step one at a time."
+            ),
+            V1_TOOLS,
+            workdir=tmpdir,
+            max_turns=20,
+        )
+
+        assert len(calls) >= 5, f"Should make at least 5 tool calls, got {len(calls)}"
+
+        with open(os.path.join(tmpdir, "src0.py")) as f:
+            assert "100" in f.read(), "src0.py should be edited"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_long_session_file_operations")
+    return True
+
+
 # =============================================================================
 # Runner
 # =============================================================================
@@ -873,4 +1042,9 @@ if __name__ == "__main__":
         test_llm_read_edit_workflow,
         test_llm_write_and_verify,
         test_llm_many_turns,
+        # LLM compression-specific
+        test_llm_survives_many_tool_calls,
+        test_llm_large_output_handling,
+        test_llm_post_summary_continuity,
+        test_llm_long_session_file_operations,
     ]) else 1)

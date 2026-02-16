@@ -701,6 +701,129 @@ def test_llm_v9_full_autonomous_flow():
     return True
 
 
+def test_llm_v9_task_claim_workflow():
+    """Model creates tasks and claims them (simulating auto-claim)."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    text, calls, _ = run_agent(
+        client,
+        "Do the following:\n"
+        "1) Create a task 'Build API' using TaskCreate\n"
+        "2) Use TaskUpdate to set task 1 to status='in_progress' (simulating auto-claim)\n"
+        "3) Use bash to run 'echo api_built'\n"
+        "4) Use TaskUpdate to set task 1 to status='completed'\n"
+        "Execute all steps.",
+        V9_TOOLS,
+        system="Use TaskCreate, TaskUpdate, and bash to manage and execute tasks.",
+        max_turns=10,
+    )
+
+    tool_names = [c[0] for c in calls]
+    assert "TaskCreate" in tool_names, f"Should use TaskCreate, got: {tool_names}"
+    assert "TaskUpdate" in tool_names, f"Should use TaskUpdate, got: {tool_names}"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_v9_task_claim_workflow")
+    return True
+
+
+def test_llm_v9_compressed_context_recovery():
+    """Agent works from a compressed summary context."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    from tests.helpers import execute_tool
+
+    messages = [
+        {"role": "user", "content": "[Conversation compressed]\n\n"
+         "Summary: The user set up a team 'dev-team' and created 2 tasks. "
+         "Task 1 'Setup DB' is completed. Task 2 'Build API' is pending. "
+         "Now the user wants to create a third task and mark task 2 as in_progress."},
+        {"role": "assistant", "content": "Understood. I have the context from the compressed conversation. Continuing work."},
+        {"role": "user", "content": "Create task 3 'Deploy to staging' using TaskCreate, "
+         "and set task 2 to in_progress using TaskUpdate."},
+    ]
+
+    system_prompt = "You are an autonomous team lead. Use TaskCreate and TaskUpdate tools."
+    tool_calls_made = []
+    ctx = {}
+
+    for _ in range(5):
+        response = client.messages.create(
+            model=MODEL,
+            system=system_prompt,
+            messages=messages,
+            tools=V9_TOOLS,
+            max_tokens=2000,
+        )
+
+        if response.stop_reason != "tool_use":
+            break
+
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        results = []
+        for tc in tool_uses:
+            tool_calls_made.append((tc.name, tc.input))
+            output = execute_tool(tc.name, tc.input, ctx=ctx)
+            results.append({
+                "type": "tool_result",
+                "tool_use_id": tc.id,
+                "content": output[:5000],
+            })
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": results})
+
+    tool_names = [c[0] for c in tool_calls_made]
+    assert "TaskCreate" in tool_names or "TaskUpdate" in tool_names, (
+        f"Should use task tools from compressed context, got: {tool_names}"
+    )
+
+    print(f"Tool calls from compressed context: {len(tool_calls_made)}")
+    print("PASS: test_llm_v9_compressed_context_recovery")
+    return True
+
+
+def test_llm_v9_complete_scenario():
+    """Full v9 scenario: create team, tasks, send messages, mark complete."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    text, calls, _ = run_agent(
+        client,
+        "Execute this full workflow:\n"
+        "1) Create team 'release-team' using TeamCreate\n"
+        "2) Create task 'Run tests' using TaskCreate\n"
+        "3) Create task 'Deploy' using TaskCreate\n"
+        "4) Send message to 'tester' saying 'Please run the test suite' using SendMessage\n"
+        "5) Mark task 1 as completed using TaskUpdate (set taskId='1', status='completed')\n"
+        "Execute all 5 steps in order.",
+        V9_TOOLS,
+        system="You are an autonomous team lead. Use all available tools to coordinate.",
+        max_turns=15,
+    )
+
+    tool_names = [c[0] for c in calls]
+    assert "TeamCreate" in tool_names, f"Should use TeamCreate, got: {tool_names}"
+    assert "TaskCreate" in tool_names, f"Should use TaskCreate, got: {tool_names}"
+    assert "SendMessage" in tool_names, f"Should use SendMessage, got: {tool_names}"
+
+    unique_tools = set(tool_names)
+    assert len(unique_tools) >= 3, (
+        f"Should use at least 3 different tool types, got: {unique_tools}"
+    )
+
+    print(f"Tool calls: {len(calls)}, unique: {unique_tools}")
+    print("PASS: test_llm_v9_complete_scenario")
+    return True
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -745,4 +868,7 @@ if __name__ == "__main__":
         test_llm_v9_creates_team,
         test_llm_v9_task_workflow,
         test_llm_v9_full_autonomous_flow,
+        test_llm_v9_task_claim_workflow,
+        test_llm_v9_compressed_context_recovery,
+        test_llm_v9_complete_scenario,
     ]) else 1)

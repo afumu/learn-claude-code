@@ -17,6 +17,8 @@ from tests.helpers import TODO_WRITE_TOOL, SKILL_TOOL, TASK_CREATE_TOOL, TASK_LI
 
 from v4_skills_agent import SkillLoader, run_skill, SYSTEM
 
+V4_TOOLS = [BASH_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL, SKILL_TOOL]
+
 
 # =============================================================================
 # Unit Tests
@@ -268,6 +270,63 @@ def test_skill_cache_separation():
     return True
 
 
+def test_llm_skill_context_persists():
+    """After loading a skill, model uses skill knowledge in subsequent tool calls."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = run_agent(
+            client,
+            "Load the 'test-skill' skill using the Skill tool, then follow its instructions "
+            "to analyze and solve a problem. Create a file called solution.txt with your analysis.",
+            V4_TOOLS,
+            system="You are a coding agent with skill support. Load skills when asked, then follow their guidance.",
+            workdir=tmpdir,
+            max_turns=10,
+        )
+
+        skill_calls = [c for c in calls if c[0] == "Skill"]
+        assert len(skill_calls) >= 1, "Should load the skill"
+        other_calls = [c for c in calls if c[0] != "Skill"]
+        assert len(other_calls) >= 1, (
+            f"Should make follow-up tool calls after loading skill, got: {[c[0] for c in calls]}"
+        )
+
+    print(f"Tool calls: {len(calls)}, Skill: {len(skill_calls)}")
+    print("PASS: test_llm_skill_context_persists")
+    return True
+
+
+def test_llm_no_skill_for_basic_task():
+    """Model should NOT load a skill for a simple bash task."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    response, calls, _ = run_agent(
+        client,
+        "Run 'echo hello_basic_task' and tell me the output.",
+        V4_TOOLS,
+        system="You are a coding agent. Only load skills when they are relevant to the task.",
+    )
+
+    skill_calls = [c for c in calls if c[0] == "Skill"]
+    assert len(skill_calls) == 0, (
+        f"Should NOT load any skill for a simple echo task, but loaded {len(skill_calls)}"
+    )
+    assert response and "hello_basic_task" in response, (
+        f"Should contain echo output, got: {response[:200]}"
+    )
+
+    print(f"Tool calls: {len(calls)}, Skill: {len(skill_calls)}")
+    print("PASS: test_llm_no_skill_for_basic_task")
+    return True
+
+
 # =============================================================================
 # Runner
 # =============================================================================
@@ -285,4 +344,6 @@ if __name__ == "__main__":
         test_llm_follows_skill_instructions,
         test_llm_skill_then_work,
         test_skill_cache_separation,
+        test_llm_skill_context_persists,
+        test_llm_no_skill_for_basic_task,
     ]) else 1)

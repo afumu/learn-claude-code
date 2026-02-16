@@ -230,6 +230,40 @@ def test_bash_subagent_spawn():
     return True
 
 
+def test_bash_inspect_and_fix():
+    """Model finds a bug in a Python file and fixes it using ONLY bash tools."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        buggy = os.path.join(tmpdir, "buggy.py")
+        with open(buggy, "w") as f:
+            f.write("def add(a, b):\n    return a - b\n")
+
+        response, calls, _ = run_agent(
+            client,
+            f"The file {buggy} has a bug: the add function subtracts instead of adding. "
+            f"Fix it using only bash commands (e.g., sed). Then run 'python3 -c \"import sys; sys.path.insert(0, \\\"{tmpdir}\\\"); from buggy import add; print(add(2,3))\"' to verify it outputs 5.",
+            V0_TOOLS,
+            workdir=tmpdir,
+            max_turns=10,
+        )
+
+        assert len(calls) >= 1, "Should make at least 1 tool call"
+        assert all(c[0] == "bash" for c in calls), "Should ONLY use bash tool"
+        with open(buggy) as f:
+            content = f.read()
+        assert "+" in content or "a + b" in content or "return a+b" in content, (
+            f"File should have the bug fixed (use + instead of -), got: {content}"
+        )
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_bash_inspect_and_fix")
+    return True
+
+
 def test_bash_output_truncation():
     """Verify that run_agent truncates tool outputs at 5000 chars.
 
@@ -269,5 +303,6 @@ if __name__ == "__main__":
         test_bash_multi_step,
         test_bash_only_tool,
         test_bash_subagent_spawn,
+        test_bash_inspect_and_fix,
         test_bash_output_truncation,
     ]) else 1)

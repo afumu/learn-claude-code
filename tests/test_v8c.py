@@ -432,6 +432,95 @@ def test_llm_shutdown_request():
     return True
 
 
+def test_llm_create_team_assign_task_message():
+    """Model creates team, creates task, sends message - full coordination."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    text, calls, _ = run_agent(
+        client,
+        "Do the following:\n"
+        "1) Create a team called 'coordination-team' using TeamCreate\n"
+        "2) Create a task 'Build frontend' using TaskCreate\n"
+        "3) Send a message to 'alice' about the task using SendMessage\n"
+        "Execute all steps.",
+        V8C_TOOLS,
+        system="Use TeamCreate, TaskCreate, SendMessage to coordinate.",
+        max_turns=10,
+    )
+
+    tool_names = [c[0] for c in calls]
+    assert "TeamCreate" in tool_names, f"Should use TeamCreate, got: {tool_names}"
+    assert "TaskCreate" in tool_names, f"Should use TaskCreate, got: {tool_names}"
+    assert "SendMessage" in tool_names, f"Should use SendMessage, got: {tool_names}"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_create_team_assign_task_message")
+    return True
+
+
+def test_llm_multi_tool_coordination():
+    """Model uses 4+ different tool types in one workflow."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text, calls, _ = run_agent(
+            client,
+            "Do the following:\n"
+            "1) Create team 'multi-tool-team' with TeamCreate\n"
+            "2) Create task 'Write readme' with TaskCreate\n"
+            "3) Write a file readme.txt with 'Hello World' using write_file\n"
+            "4) Send a message to 'bob' saying 'readme done' using SendMessage\n"
+            "Execute all steps in order.",
+            V8C_TOOLS,
+            system="Use all available tools to coordinate: TeamCreate, TaskCreate, write_file, SendMessage.",
+            max_turns=15,
+            workdir=tmpdir,
+        )
+
+        unique_tools = set(c[0] for c in calls)
+        assert len(unique_tools) >= 3, (
+            f"Should use at least 3 different tool types, got: {unique_tools}"
+        )
+
+    print(f"Tool calls: {len(calls)}, unique tools: {unique_tools}")
+    print("PASS: test_llm_multi_tool_coordination")
+    return True
+
+
+def test_llm_team_cleanup():
+    """Model creates team, does work, then deletes team."""
+    client = get_client()
+    if not client:
+        print("SKIP: No API key")
+        return True
+
+    text, calls, _ = run_agent(
+        client,
+        "Do the following in order:\n"
+        "1) Create a team called 'cleanup-team' using TeamCreate\n"
+        "2) Create a task 'Cleanup task' using TaskCreate\n"
+        "3) Delete the team using TeamDelete\n"
+        "Execute all steps.",
+        V8C_TOOLS,
+        system="Use TeamCreate, TaskCreate, TeamDelete to manage team lifecycle.",
+        max_turns=10,
+    )
+
+    tool_names = [c[0] for c in calls]
+    assert "TeamCreate" in tool_names, f"Should use TeamCreate, got: {tool_names}"
+    assert "TeamDelete" in tool_names, f"Should use TeamDelete, got: {tool_names}"
+
+    print(f"Tool calls: {len(calls)}")
+    print("PASS: test_llm_team_cleanup")
+    return True
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -466,4 +555,7 @@ if __name__ == "__main__":
         # LLM integration
         test_llm_team_and_task_workflow,
         test_llm_shutdown_request,
+        test_llm_create_team_assign_task_message,
+        test_llm_multi_tool_coordination,
+        test_llm_team_cleanup,
     ]) else 1)
